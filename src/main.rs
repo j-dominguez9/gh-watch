@@ -59,7 +59,9 @@ enum Cmd {
     /// issue). For a schedule; the first run only starts the clock.
     Notify {
         /// Notify about this window instead (e.g. 2d), leaving the saved
-        /// "last notified" time alone: for trying it out.
+        /// "last notified" time alone: for trying it out. These are real
+        /// notifications, and the next scheduled run may send them again;
+        /// add --dry-run to only print them.
         #[arg(long)]
         since: Option<String>,
         /// Print what would be sent instead of sending it. Changes nothing.
@@ -86,7 +88,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Cmd::Changes { since } => {
-            let since = Utc::now() - parse_duration(&since)?;
+            let since = ago(parse_duration(&since)?)?;
             let found = gather(&repos, &watch, since)?;
             print(&found, since);
             Ok(())
@@ -216,7 +218,7 @@ fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bo
 
     let trial = window.is_some() || dry_run;
     let since = match (window, state.last_notified) {
-        (Some(window), _) => now - window,
+        (Some(window), _) => ago(window)?,
         (None, Some(since)) => since,
         (None, None) if dry_run => {
             println!("First run: nothing to compare with yet. Try --since 2d.");
@@ -230,7 +232,10 @@ fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bo
         }
     };
     let found = gather(repos, watch, since)?;
-    print(&found, since);
+    // A dry run lists each change as a "Would notify" line instead.
+    if !dry_run || found.is_empty() {
+        print(&found, since);
+    }
 
     let mut notes: Vec<Note> = found
         .iter()
@@ -292,13 +297,21 @@ fn parse_duration(text: &str) -> Result<Duration> {
     let (n, unit) = text.split_at(digits);
     let bad = || format!("bad duration {text:?}: try 30m, 12h, 1d or 2w");
     let n: i64 = n.parse().with_context(bad)?;
-    Ok(match unit {
-        "m" => Duration::minutes(n),
-        "h" => Duration::hours(n),
-        "d" => Duration::days(n),
-        "w" => Duration::weeks(n),
+    let duration = match unit {
+        "m" => Duration::try_minutes(n),
+        "h" => Duration::try_hours(n),
+        "d" => Duration::try_days(n),
+        "w" => Duration::try_weeks(n),
         _ => bail!(bad()),
-    })
+    };
+    duration.with_context(|| format!("duration {text:?} is too long"))
+}
+
+/// The time `window` ago, or an error if that's before the calendar starts.
+fn ago(window: Duration) -> Result<DateTime<Utc>> {
+    Utc::now()
+        .checked_sub_signed(window)
+        .context("that --since window is too long")
 }
 
 #[cfg(test)]
@@ -310,6 +323,8 @@ mod tests {
         assert_eq!(parse_duration("30m").unwrap(), Duration::minutes(30));
         assert_eq!(parse_duration("2w").unwrap(), Duration::weeks(2));
         assert!(parse_duration("3y").is_err());
+        assert!(parse_duration("100000000000w").is_err());
+        assert!(ago(Duration::MAX).is_err());
         assert!(parse_duration("d").is_err());
     }
 
