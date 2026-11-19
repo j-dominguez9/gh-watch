@@ -240,35 +240,35 @@ fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bo
     let mut notes: Vec<Note> = found
         .iter()
         .map(|(repo, c)| Note {
-            title: format!("{} #{}", short_repo(repo), c.issue.number),
-            subtitle: c.issue.short_title().to_string(),
-            body: what(c).join("\n"),
+            // A short headline that's never cut off, saying who did what
+            // where, and the long text in the body, which can wrap.
+            title: headline(repo, c),
+            subtitle: String::new(),
+            body: content(c),
             open: c.url().to_string(),
+            group: repo.clone(),
         })
         .collect();
     if notes.len() > MAX_NOTIFICATIONS {
-        let rest = notes.split_off(MAX_NOTIFICATIONS - 1);
-        let repo = &found[0].0;
+        let rest = &found[MAX_NOTIFICATIONS - 1..];
+        notes.truncate(MAX_NOTIFICATIONS - 1);
         notes.push(Note {
-            title: String::from("gh-watch"),
-            subtitle: format!("{} more updates", rest.len()),
-            body: rest
-                .iter()
-                .map(|n| n.title.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
+            title: format!("{} more updates", rest.len()),
+            subtitle: String::new(),
+            body: summary(rest),
             open: format!(
-                "https://github.com/{repo}/issues?q=involves%3A%40me+updated%3A%3E%3D{}",
+                "https://github.com/{}/issues?q=involves%3A%40me+updated%3A%3E%3D{}",
+                found[0].0,
                 since.format("%Y-%m-%d")
             ),
+            group: String::from("summary"),
         });
     }
     for note in &notes {
         if dry_run {
             println!(
-                "Would notify: {} | {} | {}",
+                "Would notify: {} | {}",
                 note.title,
-                note.subtitle,
                 note.body.replace('\n', " / ")
             );
         } else {
@@ -281,6 +281,61 @@ fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bo
     // Moved only after sending, so a failed run tries again next time.
     state.last_notified = Some(now);
     save(&state)
+}
+
+/// An issue as a notification names it: "arize (#48765)".
+fn reference(repo: &str, c: &Change) -> String {
+    format!("{} (#{})", short_repo(repo), c.issue.number)
+}
+
+/// A notification's first line: who did what, where. "sally commented on
+/// arize (#48765)", "arize (#48765) closed by PR #94655".
+fn headline(repo: &str, c: &Change) -> String {
+    let issue = reference(repo, c);
+    if c.closed {
+        return match c.closed_by() {
+            Some(pr) => format!("{issue} closed by PR #{}", pr.number),
+            None => format!("{issue} closed"),
+        };
+    }
+    let people = c.commenters();
+    match (c.comments.len(), people.as_slice()) {
+        (1, [who]) => format!("{who} commented on {issue}"),
+        (n, [who]) => format!("{n} new comments on {issue} from {who}"),
+        (n, many) => format!("{n} new comments on {issue} from {}", many.join(", ")),
+    }
+}
+
+/// A notification's body: the newest comment in its writer's words (with
+/// their name when there could be doubt), or for a close without
+/// comments, the issue's full title.
+fn content(c: &Change) -> String {
+    let Some(last) = c.comments.last() else {
+        return c.issue.short_title().to_string();
+    };
+    let text = changes::preview(&last.body, PREVIEW_CHARS);
+    if c.comments.len() == 1 && !c.closed {
+        text // the headline already says who
+    } else {
+        format!("{}: {text}", last.user.login)
+    }
+}
+
+/// The summary's body: the rest, by repo. "arize: #93337, #95251".
+fn summary(rest: &[(String, Change)]) -> String {
+    let mut by_repo: Vec<(&str, Vec<String>)> = Vec::new();
+    for (repo, c) in rest {
+        let number = format!("#{}", c.issue.number);
+        match by_repo.iter_mut().find(|(r, _)| *r == short_repo(repo)) {
+            Some((_, numbers)) => numbers.push(number),
+            None => by_repo.push((short_repo(repo), vec![number])),
+        }
+    }
+    by_repo
+        .iter()
+        .map(|(repo, numbers)| format!("{repo}: {}", numbers.join(", ")))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// "Arize-ai/arize" -> "arize", to keep titles short.
@@ -326,6 +381,91 @@ mod tests {
         assert!(parse_duration("100000000000w").is_err());
         assert!(ago(Duration::MAX).is_err());
         assert!(parse_duration("d").is_err());
+    }
+
+    fn change(closed: bool, pr: Option<u64>, comments: &[(&str, &str)]) -> Change {
+        let mut issue: gh_watch::gh::Issue = serde_json::from_str(
+            r#"{"number": 48765, "title": "[Bug] Max limit counts spans", "state": "OPEN",
+                "url": "u", "updatedAt": "2026-11-18T00:00:00Z", "closedAt": null,
+                "labels": [], "assignees": []}"#,
+        )
+        .unwrap();
+        if let Some(n) = pr {
+            issue.prs.push(gh_watch::gh::PrRef {
+                number: n,
+                url: String::new(),
+            });
+        }
+        let comments = comments
+            .iter()
+            .map(|(who, body)| {
+                serde_json::from_value(serde_json::json!({
+                    "user": {"login": who, "type": "User"},
+                    "created_at": "2026-11-18T00:00:00Z", "body": body, "html_url": ""
+                }))
+                .unwrap()
+            })
+            .collect();
+        Change {
+            issue,
+            closed,
+            comments,
+        }
+    }
+
+    const REPO: &str = "Arize-ai/arize";
+
+    #[test]
+    fn closes_name_the_pr_and_show_the_title() {
+        let c = change(true, Some(94655), &[]);
+        assert_eq!(headline(REPO, &c), "arize (#48765) closed by PR #94655");
+        assert_eq!(content(&c), "Max limit counts spans");
+        assert_eq!(
+            headline(REPO, &change(true, None, &[])),
+            "arize (#48765) closed"
+        );
+    }
+
+    #[test]
+    fn one_comment_names_its_writer_in_the_headline() {
+        let c = change(false, None, &[("sally", "Looks  fixed\nnow")]);
+        assert_eq!(headline(REPO, &c), "sally commented on arize (#48765)");
+        assert_eq!(content(&c), "Looks fixed now");
+    }
+
+    #[test]
+    fn several_comments_are_counted_and_the_newest_shown() {
+        let c = change(
+            false,
+            None,
+            &[("sally", "a"), ("amir", "b"), ("sally", "c")],
+        );
+        assert_eq!(
+            headline(REPO, &c),
+            "3 new comments on arize (#48765) from sally, amir"
+        );
+        assert_eq!(content(&c), "sally: c");
+        let c = change(false, None, &[("sally", "a"), ("sally", "b")]);
+        assert_eq!(
+            headline(REPO, &c),
+            "2 new comments on arize (#48765) from sally"
+        );
+    }
+
+    #[test]
+    fn a_close_with_comments_shows_the_comment() {
+        let c = change(true, Some(9), &[("sally", "Shipped")]);
+        assert_eq!(headline(REPO, &c), "arize (#48765) closed by PR #9");
+        assert_eq!(content(&c), "sally: Shipped");
+    }
+
+    #[test]
+    fn summary_groups_numbers_by_repo() {
+        let rest = vec![
+            (REPO.to_string(), change(true, None, &[])),
+            ("acme/web".to_string(), change(true, None, &[])),
+        ];
+        assert_eq!(summary(&rest), "arize: #48765 · web: #48765");
     }
 
     #[test]

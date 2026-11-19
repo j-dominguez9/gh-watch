@@ -53,11 +53,20 @@ add `--dry-run` to only print them.
 `notify` sends one notification per changed issue: its title, and the
 newest comment in the commenter's words, or which PR closed it. Clicking
 opens the comment or issue. Past five, the rest go into one summary. The
-first run only starts the clock. On macOS, install
+first run only starts the clock. On Linux it uses `notify-send`.
+
+On macOS, notifications come from gh-watch's own app, with its cat icon,
+if you build and install it once from a clone of this repo (it needs
+Xcode's command line tools, and asks macOS for permission to notify):
+
+```sh
+macos/build.sh --install
+```
+
+Without the app, gh-watch uses
 [terminal-notifier](https://github.com/julienXX/terminal-notifier)
-(`brew install terminal-notifier`) for notifications you can click;
-without it they still show, but clicking does nothing. On Linux it uses
-`notify-send`.
+(`brew install terminal-notifier`), so clicking still opens the issue,
+and failing that plain macOS notifications, where clicking does nothing.
 
 ## Config
 

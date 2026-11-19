@@ -1,6 +1,7 @@
-//! Desktop notifications. On macOS: terminal-notifier if it's installed
-//! (clicking opens the issue), else plain notifications through osascript
-//! (which can't open anything). On Linux: notify-send.
+//! Desktop notifications. On macOS: gh-watch's own app (`macos/`, so they
+//! show under its name and icon) if it's installed, else terminal-notifier,
+//! else plain notifications through osascript (which can't open anything
+//! when clicked). On Linux: notify-send.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -13,6 +14,9 @@ pub struct Note {
     pub body: String,
     /// What a click opens.
     pub open: String,
+    /// Notifications with the same group stack together in Notification
+    /// Center (one per repo).
+    pub group: String,
 }
 
 pub fn send(note: &Note) -> Result<()> {
@@ -27,6 +31,25 @@ pub fn send(note: &Note) -> Result<()> {
             bail!("notify-send failed ({status})");
         }
         return Ok(());
+    }
+
+    if let Some(program) = app() {
+        let status = Command::new(program)
+            .args(["--title", &note.title, "--subtitle", &note.subtitle])
+            .args([
+                "--message",
+                &note.body,
+                "--open",
+                &note.open,
+                "--group",
+                &note.group,
+            ])
+            .status();
+        match status {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => eprintln!("gh-watch app failed ({status}), trying the next way"),
+            Err(err) => eprintln!("could not run the gh-watch app ({err}), trying the next way"),
+        }
     }
 
     if let Some(program) = terminal_notifier() {
@@ -68,6 +91,17 @@ pub fn send(note: &Note) -> Result<()> {
         bail!("osascript failed ({status})");
     }
     Ok(())
+}
+
+/// The gh-watch app's program, if it's installed (`macos/build.sh --install`).
+fn app() -> Option<PathBuf> {
+    let program = "gh-watch.app/Contents/MacOS/gh-watch-notifier";
+    dirs::home_dir()
+        .map(|home| home.join("Applications"))
+        .into_iter()
+        .chain([PathBuf::from("/Applications")])
+        .map(|dir| dir.join(program))
+        .find(|program| program.is_file())
 }
 
 /// Where terminal-notifier is, if installed. Homebrew's folders are checked
