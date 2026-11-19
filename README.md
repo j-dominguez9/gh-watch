@@ -17,21 +17,36 @@ there's no token to set up: if `gh` works, gh-watch works.
 
 ## Install
 
-As a gh extension, from a release's prebuilt binaries (macOS and Linux):
+As a gh extension (prebuilt binaries for macOS and Linux):
 
 ```sh
 gh extension install j-dominguez9/gh-watch
-gh watch changes
 ```
 
-Or with Cargo:
+Or with Cargo: `cargo install --git https://github.com/j-dominguez9/gh-watch`
+(then it's `gh-watch` rather than `gh watch`).
+
+Then, from inside the repo you want to watch (or pass `--repo owner/name`):
 
 ```sh
-cargo install --git https://github.com/j-dominguez9/gh-watch
-gh-watch changes
+gh watch setup
 ```
 
-Either way, `gh auth login` first if you haven't.
+That does everything in one go:
+
+1. writes a config with that repo, so scheduled runs know what to watch;
+2. on macOS, builds and installs gh-watch's notifier app, so notifications
+   show under its own name and cat icon (macOS asks once for permission);
+3. on macOS, runs `notify` every 30 minutes;
+4. starts the clock, so you only hear about changes from now on.
+
+To see what a notification looks like right away: `gh watch notify --since 2d`.
+
+You need `gh auth login` done. The app needs Apple's command line tools
+(`xcode-select --install`), which you likely have already since they come
+with git. Without them, setup carries on and notifications use
+[terminal-notifier](https://github.com/julienXX/terminal-notifier) if it's
+installed, or plain macOS notifications.
 
 ## Use
 
@@ -55,18 +70,12 @@ newest comment in the commenter's words, or which PR closed it. Clicking
 opens the comment or issue. Past five, the rest go into one summary. The
 first run only starts the clock. On Linux it uses `notify-send`.
 
-On macOS, notifications come from gh-watch's own app, with its cat icon,
-if you build and install it once from a clone of this repo (it needs
-Xcode's command line tools, and asks macOS for permission to notify):
+Clicking a notification opens the comment or issue. On Linux they come
+from `notify-send`.
 
-```sh
-macos/build.sh --install
-```
-
-Without the app, gh-watch uses
-[terminal-notifier](https://github.com/julienXX/terminal-notifier)
-(`brew install terminal-notifier`), so clicking still opens the issue,
-and failing that plain macOS notifications, where clicking does nothing.
+Each step of `setup` also works on its own: `gh watch install-app`
+rebuilds the app (say, after updating gh-watch), `gh watch schedule`
+reinstalls the schedule, and `gh watch schedule --remove` stops it.
 
 ## Config
 
@@ -80,19 +89,6 @@ labels = ["needs-review"]
 # Issues you're involved in: opened, assigned, mentioned, commented on.
 involved = true
 ```
-
-## Notifications on a schedule (macOS)
-
-To run `notify` every 30 minutes, with `repos` set in the config:
-
-```sh
-sed -e "s|GH_WATCH_PATH|$(command -v gh-watch)|" -e "s|HOME_DIR|$HOME|g" \
-  contrib/gh-watch-notify.plist > ~/Library/LaunchAgents/com.gh-watch.notify.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gh-watch.notify.plist
-```
-
-For the extension, `command -v gh-watch` finds nothing: use the binary gh
-installed, `~/.local/share/gh/extensions/gh-watch/gh-watch`.
 
 ## As a library
 

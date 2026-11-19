@@ -6,8 +6,10 @@
 //! only real changes: closed, or commented on by someone other than you or
 //! a bot.
 
+mod app;
 mod config;
 mod desktop;
+mod schedule;
 
 use std::path::PathBuf;
 
@@ -55,6 +57,19 @@ enum Cmd {
         #[arg(long, default_value = "1d")]
         since: String,
     },
+    /// Set everything up in one go: a config with the repo (the one you're
+    /// in, or --repo), the notifier app (macOS), notifications every 30
+    /// minutes, and the clock started.
+    Setup,
+    /// Build and install gh-watch's notifier app (macOS), so notifications
+    /// show under its own name and icon. Needs Apple's command line tools.
+    InstallApp,
+    /// Run `notify` every 30 minutes (macOS, through launchd).
+    Schedule {
+        /// Stop and remove the schedule instead.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Notify about what changed since the last time (one notification per
     /// issue). For a schedule; the first run only starts the clock.
     Notify {
@@ -72,6 +87,39 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Commands that don't need to know what to watch.
+    match cli.command {
+        Cmd::InstallApp => {
+            let path = app::install()?;
+            println!(
+                "Installed {}. Allow notifications if macOS asks.",
+                path.display()
+            );
+            return Ok(());
+        }
+        Cmd::Schedule { remove: true } => {
+            let removed = schedule::remove()?;
+            println!(
+                "{}",
+                if removed {
+                    "Schedule removed."
+                } else {
+                    "There was no schedule."
+                }
+            );
+            return Ok(());
+        }
+        Cmd::Schedule { remove: false } => {
+            schedule::install()?;
+            println!(
+                "gh-watch notify now runs every 30 minutes (log: {}).",
+                schedule::log_path()?.display()
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let config = Config::load()?;
     let repos = repos(&cli, &config)?;
     let watch = Watch {
@@ -97,7 +145,60 @@ fn main() -> Result<()> {
             let window = since.as_deref().map(parse_duration).transpose()?;
             notify(&repos, &watch, window, dry_run)
         }
+        Cmd::Setup => setup(&repos),
+        Cmd::InstallApp | Cmd::Schedule { .. } => unreachable!("handled above"),
     }
+}
+
+/// `gh-watch setup`: each step says what it did, and a step that fails
+/// (say, no command line tools for the app) doesn't stop the rest.
+fn setup(repos: &[String]) -> Result<()> {
+    println!("Setting up gh-watch for {}:", repos.join(", "));
+
+    // 1. Remember the repos, so scheduled runs (which start outside any
+    //    repo) know what to watch.
+    let config_path = Config::path()?;
+    if Config::exists()? {
+        println!("  ✓ Config: keeping your {}", config_path.display());
+    } else {
+        Config::write_new(repos)?;
+        println!("  ✓ Config: wrote {}", config_path.display());
+    }
+
+    // 2. The notifier app, on macOS.
+    if cfg!(target_os = "macos") {
+        match app::install() {
+            Ok(path) => println!(
+                "  ✓ App: installed {}. Allow notifications if macOS asks.",
+                path.display()
+            ),
+            Err(err) => println!(
+                "  ! App: not installed ({err:#}). Notifications will use terminal-notifier \
+                 if it's installed (brew install terminal-notifier), or plain ones."
+            ),
+        }
+    }
+
+    // 3. Every 30 minutes.
+    if cfg!(target_os = "macos") {
+        schedule::install()?;
+        println!(
+            "  ✓ Schedule: notify runs every 30 minutes (log: {})",
+            schedule::log_path()?.display()
+        );
+    } else {
+        println!("  - Schedule: on Linux, run `gh-watch notify` from cron or a systemd timer.");
+    }
+
+    // 4. Start the clock, so the first scheduled run only reports what's new.
+    let mut state = load_state()?;
+    if state.last_notified.is_none() {
+        state.last_notified = Some(Utc::now());
+        save_state(&state)?;
+    }
+    println!("  ✓ Watching from now on.");
+    println!("\nTo see what notifications look like, try: gh watch notify --since 2d");
+    Ok(())
 }
 
 /// The repos to watch: --repo, else the config's, else the current one.
@@ -201,20 +302,27 @@ fn state_path() -> Result<PathBuf> {
     Ok(home.join(".local/state/gh-watch/state.json"))
 }
 
+/// The saved state, or an empty one if there's none (or it's unreadable).
+fn load_state() -> Result<State> {
+    let path = state_path()?;
+    Ok(std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default())
+}
+
+fn save_state(state: &State) -> Result<()> {
+    let path = state_path()?;
+    std::fs::create_dir_all(path.parent().context("bad state path")?)?;
+    std::fs::write(&path, serde_json::to_vec_pretty(state)?)?;
+    Ok(())
+}
+
 /// Notifies about changes since the last run, or over `window` if given.
 /// Only a normal run (no window, not a dry run) moves the saved time.
 fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bool) -> Result<()> {
-    let path = state_path()?;
-    let mut state: State = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+    let mut state = load_state()?;
     let now = Utc::now();
-    let save = |state: &State| -> Result<()> {
-        std::fs::create_dir_all(path.parent().context("bad state path")?)?;
-        std::fs::write(&path, serde_json::to_vec_pretty(state)?)?;
-        Ok(())
-    };
 
     let trial = window.is_some() || dry_run;
     let since = match (window, state.last_notified) {
@@ -226,7 +334,7 @@ fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bo
         }
         (None, None) => {
             state.last_notified = Some(now);
-            save(&state)?;
+            save_state(&state)?;
             println!("First run: you'll be notified about changes from now on.");
             return Ok(());
         }
@@ -280,7 +388,7 @@ fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bo
     }
     // Moved only after sending, so a failed run tries again next time.
     state.last_notified = Some(now);
-    save(&state)
+    save_state(&state)
 }
 
 /// An issue as a notification names it: "arize (#48765)".

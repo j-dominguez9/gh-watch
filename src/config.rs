@@ -44,6 +44,30 @@ impl Config {
         Ok(home.join(".config/gh-watch/config.toml"))
     }
 
+    pub fn exists() -> Result<bool> {
+        Ok(Self::path()?.exists())
+    }
+
+    /// Writes a first config watching `repos` (doesn't replace one).
+    pub fn write_new(repos: &[String]) -> Result<()> {
+        let path = Self::path()?;
+        if path.exists() {
+            return Ok(());
+        }
+        let list = repos
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = format!(
+            "# Repos to watch, as owner/name.\nrepos = [{list}]\n\
+             # Also watch issues with these labels (in every repo above).\n# labels = [\"needs-review\"]\n\
+             # Issues you're involved in: opened, assigned, mentioned, commented on.\ninvolved = true\n"
+        );
+        std::fs::create_dir_all(path.parent().context("bad config path")?)?;
+        std::fs::write(&path, text).with_context(|| format!("could not write {}", path.display()))
+    }
+
     /// The config, or the defaults if there's no file.
     pub fn load() -> Result<Config> {
         let path = Self::path()?;
