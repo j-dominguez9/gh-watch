@@ -41,7 +41,12 @@ gh watch changes --since 3h         # also 30m, 2d, 1w
 gh watch -R owner/repo changes      # another repo (repeat -R for several)
 gh watch -l needs-review changes    # also issues with this label
 gh watch notify                     # notify about changes since the last run
+gh watch notify --since 2d          # try it: notify about the last 2 days
+gh watch notify --since 2d --dry-run   # or just print what it would send
 ```
+
+`--since` and `--dry-run` leave the saved "last notified" time alone, so a
+scheduled `notify` still picks up where it left off.
 
 `notify` sends one notification per changed issue: its title, and the
 newest comment in the commenter's words, or which PR closed it. Clicking

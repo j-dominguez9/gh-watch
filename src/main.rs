@@ -57,7 +57,15 @@ enum Cmd {
     },
     /// Notify about what changed since the last time (one notification per
     /// issue). For a schedule; the first run only starts the clock.
-    Notify,
+    Notify {
+        /// Notify about this window instead (e.g. 2d), leaving the saved
+        /// "last notified" time alone: for trying it out.
+        #[arg(long)]
+        since: Option<String>,
+        /// Print what would be sent instead of sending it. Changes nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -83,7 +91,10 @@ fn main() -> Result<()> {
             print(&found, since);
             Ok(())
         }
-        Cmd::Notify => notify(&repos, &watch),
+        Cmd::Notify { since, dry_run } => {
+            let window = since.as_deref().map(parse_duration).transpose()?;
+            notify(&repos, &watch, window, dry_run)
+        }
     }
 }
 
@@ -188,7 +199,9 @@ fn state_path() -> Result<PathBuf> {
     Ok(home.join(".local/state/gh-watch/state.json"))
 }
 
-fn notify(repos: &[String], watch: &Watch) -> Result<()> {
+/// Notifies about changes since the last run, or over `window` if given.
+/// Only a normal run (no window, not a dry run) moves the saved time.
+fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bool) -> Result<()> {
     let path = state_path()?;
     let mut state: State = std::fs::read(&path)
         .ok()
@@ -201,11 +214,20 @@ fn notify(repos: &[String], watch: &Watch) -> Result<()> {
         Ok(())
     };
 
-    let Some(since) = state.last_notified else {
-        state.last_notified = Some(now);
-        save(&state)?;
-        println!("First run: you'll be notified about changes from now on.");
-        return Ok(());
+    let trial = window.is_some() || dry_run;
+    let since = match (window, state.last_notified) {
+        (Some(window), _) => now - window,
+        (None, Some(since)) => since,
+        (None, None) if dry_run => {
+            println!("First run: nothing to compare with yet. Try --since 2d.");
+            return Ok(());
+        }
+        (None, None) => {
+            state.last_notified = Some(now);
+            save(&state)?;
+            println!("First run: you'll be notified about changes from now on.");
+            return Ok(());
+        }
     };
     let found = gather(repos, watch, since)?;
     print(&found, since);
@@ -237,7 +259,19 @@ fn notify(repos: &[String], watch: &Watch) -> Result<()> {
         });
     }
     for note in &notes {
-        desktop::send(note)?;
+        if dry_run {
+            println!(
+                "Would notify: {} | {} | {}",
+                note.title,
+                note.subtitle,
+                note.body.replace('\n', " / ")
+            );
+        } else {
+            desktop::send(note)?;
+        }
+    }
+    if trial {
+        return Ok(());
     }
     // Moved only after sending, so a failed run tries again next time.
     state.last_notified = Some(now);
