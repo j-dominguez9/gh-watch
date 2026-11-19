@@ -1,0 +1,3 @@
+/target
+# The binary gh runs when installed locally with `gh extension install .`
+/gh-watch

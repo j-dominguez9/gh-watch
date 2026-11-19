@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Runs `gh-watch notify` every 30 minutes on macOS. To install (see README):
+     sed -e "s|GH_WATCH_PATH|$(command -v gh-watch)|" -e "s|HOME_DIR|$HOME|g" \
+       contrib/gh-watch-notify.plist > ~/Library/LaunchAgents/com.gh-watch.notify.plist
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gh-watch.notify.plist -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gh-watch.notify</string>
+
+    <!-- Full paths only: launchd doesn't expand ~ or use your shell's PATH.
+         gh is found in Homebrew's folders without it. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>GH_WATCH_PATH</string>
+        <string>notify</string>
+    </array>
+
+    <!-- Every 30 minutes while the Mac is awake. A failed run doesn't count
+         as notified, so the next one catches up. -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <key>StandardOutPath</key>
+    <string>HOME_DIR/.local/state/gh-watch/notify.log</string>
+    <key>StandardErrorPath</key>
+    <string>HOME_DIR/.local/state/gh-watch/notify.log</string>
+</dict>
+</plist>

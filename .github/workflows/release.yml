@@ -1,0 +1,50 @@
+# On a version tag (e.g. v0.1.0): build gh-watch for each platform and
+# attach the binaries to a GitHub release. `gh extension install` picks
+# the one for the user's machine by its name, gh-watch-<os>-<arch>.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+  build:
+    needs: release
+    strategy:
+      matrix:
+        include:
+          # Both Mac builds on Apple Silicon runners: Rust builds the Intel
+          # one from there too.
+          - { os: macos-latest, target: aarch64-apple-darwin, asset: gh-watch-darwin-arm64, test: true }
+          - { os: macos-latest, target: x86_64-apple-darwin, asset: gh-watch-darwin-amd64, test: false }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, asset: gh-watch-linux-amd64, test: true }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        if: matrix.test
+        run: cargo test --locked
+      - name: Build
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/gh-watch ${{ matrix.asset }}
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" ${{ matrix.asset }}
