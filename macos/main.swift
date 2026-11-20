@@ -26,13 +26,26 @@ struct Options {
     var group: String?
 }
 
-/// nil when there's nothing to show (no arguments at all).
+/// nil when there's nothing to show (no options of ours: macOS starting
+/// the app for a click). Flags macOS itself may add at launch have a single
+/// dash (-psn_0_12345, -NSDocumentRevisionsDebugMode YES) and are skipped,
+/// so they can't make a click-launch fail.
 func parseOptions(_ args: [String]) -> Options? {
-    if args.isEmpty { return nil }
+    var ours = false
     var options = Options()
     var rest = args[...]
     while let flag = rest.popFirst() {
+        if !flag.hasPrefix("--") {
+            // A system flag, and its value if it has one.
+            if flag.hasPrefix("-NS") || flag.hasPrefix("-Apple"),
+                let next = rest.first, !next.hasPrefix("-")
+            {
+                rest.removeFirst()
+            }
+            continue
+        }
         guard let value = rest.popFirst() else { fail(1, "\(flag) needs a value") }
+        ours = true
         switch flag {
         case "--title": options.title = value
         case "--subtitle": options.subtitle = value
@@ -42,6 +55,7 @@ func parseOptions(_ args: [String]) -> Options? {
         default: fail(1, "unknown option \(flag)")
         }
     }
+    if !ours { return nil }
     if options.title.isEmpty || options.message.isEmpty {
         fail(1, "--title and --message are required")
     }
@@ -71,6 +85,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // `--check` (for `gh watch doctor`): say whether notifications are
+        // allowed, without posting one. Prints the answer; exits 0 if
+        // banners can show, 2 if not (provisional permission only puts
+        // them quietly in Notification Center).
+        if CommandLine.arguments.dropFirst().first == "--check" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { fail(3, "timed out") }
+            center.getNotificationSettings { settings in
+                switch settings.authorizationStatus {
+                case .authorized:
+                    print("allowed")
+                    exit(0)
+                case .provisional:
+                    print("delivered quietly")
+                case .denied:
+                    print("turned off")
+                case .notDetermined:
+                    print("not asked yet")
+                default:
+                    print("unknown")
+                }
+                exit(2)
+            }
+            return
+        }
         if let options = parseOptions(Array(CommandLine.arguments.dropFirst())) {
             // The first time, this waits for you to answer the permission
             // prompt. Don't hang forever if nobody's there to answer.
@@ -107,6 +145,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 exit(0)
             }
         }
+    }
+
+    // Shown even if this app happens to be the one in front (an install
+    // opens it), which macOS would otherwise keep to Notification Center.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler:
+            @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
     }
 
     func userNotificationCenter(

@@ -51,10 +51,10 @@ installed, or plain macOS notifications.
 ## Use
 
 ```sh
-gh watch changes                    # what changed in the last day, in the repo you're in
+gh watch changes                    # what changed in the last day, in what you watch
 gh watch changes --since 3h         # also 30m, 2d, 1w
-gh watch -R owner/repo changes      # another repo (repeat -R for several)
-gh watch -l needs-review changes    # also issues with this label
+gh watch changes -R owner/repo      # look at another repo instead, this once
+gh watch changes -l needs-review    # or at issues with this label instead
 gh watch notify                     # notify about changes since the last run
 gh watch notify --since 2d          # try it: notify about the last 2 days
 gh watch notify --since 2d --dry-run   # or just print what it would send
@@ -63,7 +63,12 @@ gh watch notify --since 2d --dry-run   # or just print what it would send
 `--since` and `--dry-run` leave the saved "last notified" time alone, so a
 scheduled `notify` still picks up where it left off. That also means a plain
 `--since` run's notifications can come again on the next scheduled run;
-add `--dry-run` to only print them.
+add `--dry-run` to only print them. To change what's watched for good, use
+`gh watch config` (below): `notify` always uses the config.
+
+If a repo or issue can't be read (no network, say), `notify` keeps the
+clock where it was and looks at the same window again next time, without
+repeating what it already sent, for up to a day.
 
 `notify` sends one notification per changed issue: its title, and the
 newest comment in the commenter's words, or which PR closed it. Clicking
@@ -74,12 +79,55 @@ Clicking a notification opens the comment or issue. On Linux they come
 from `notify-send`.
 
 Each step of `setup` also works on its own: `gh watch install-app`
-rebuilds the app (say, after updating gh-watch), `gh watch schedule`
-reinstalls the schedule, and `gh watch schedule --remove` stops it.
+rebuilds the app, `gh watch schedule` reinstalls the schedule, and `gh
+watch schedule --remove` stops it. Running `setup` again does all of it
+and is safe to repeat.
+
+## Not working?
+
+```sh
+gh watch doctor
+```
+
+checks each thing notifications need, with the fix for anything that's
+wrong: gh and its login, the config, the app and whether macOS lets it
+notify, and the schedule (including a run that failed, or a schedule
+pointing at an old gh-watch). Then it sends a test notification and says
+how it went out.
+
+A notification without the cat icon, which does nothing when clicked,
+came without the app (plain macOS notifications): `doctor` says why.
+Usually the app couldn't be built (`xcode-select --install`, then `gh watch
+install-app`) or notifications for it are off (System Settings →
+Notifications → gh-watch).
+
+After updating gh-watch (`gh extension upgrade gh-watch`), run `gh watch
+setup` again: it keeps your config and where it left off, rebuilds the app
+from the new version, and reloads the schedule.
 
 ## Config
 
-Optional, in `~/.config/gh-watch/config.toml`, so you don't need flags:
+`setup` writes it: the repo, and issues you're involved in. To watch more,
+or less:
+
+```sh
+gh watch config                               # what's watched, and where the file is
+gh watch config add --label customer-acme     # also issues with this label
+gh watch config add --repo owner/other        # another repo
+gh watch config remove --label customer-acme
+gh watch config remove --involved             # only labels, not issues you're in
+```
+
+It won't save a config that watches nothing (no repo, or no labels and not
+issues you're involved in), since every scheduled run would fail on it.
+Running `gh watch setup` in another repo adds that repo.
+
+A label that doesn't exist in a watched repo gets a warning, since a typo
+would otherwise match nothing. First time, `gh watch setup --label
+customer-acme` does both at once.
+
+It's `~/.config/gh-watch/config.toml`, which you can also edit by hand
+(`config add` and `remove` rewrite it with the standard comments):
 
 ```toml
 # Repos to watch, as owner/name. Default: the repo you run it in.

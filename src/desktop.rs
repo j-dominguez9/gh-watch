@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 
@@ -19,22 +21,81 @@ pub struct Note {
     pub group: String,
 }
 
-pub fn send(note: &Note) -> Result<()> {
+/// Set once the notifier app fails in a way that would happen again (not
+/// allowed, timed out, crashed, couldn't run), so the rest of this run's
+/// notifications go straight to the next way: if it's waiting on a
+/// permission nobody answers, each try would wait out its timeout again.
+/// Bad arguments (exit 1) don't set it: that's about one note, not the app.
+static APP_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Why the app last failed to send, for `gh watch doctor`.
+static APP_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Why the app failed the last time it was tried, if it did.
+/// How a program failed: "exit status: 2: not allowed", or just the
+/// status when it said nothing.
+pub fn failure(status: std::process::ExitStatus, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    if stderr.is_empty() {
+        status.to_string()
+    } else {
+        format!("{status}: {stderr}")
+    }
+}
+
+pub fn app_error() -> Option<String> {
+    APP_ERROR.lock().ok().and_then(|e| e.clone())
+}
+
+/// How a notification went out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Way {
+    App,
+    TerminalNotifier,
+    Osascript,
+    NotifySend,
+}
+
+impl Way {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Way::App => "the gh-watch app",
+            Way::TerminalNotifier => "terminal-notifier (no cat icon, but clicks open the issue)",
+            Way::Osascript => "plain macOS notifications (no cat icon, and clicks open nothing)",
+            Way::NotifySend => "notify-send",
+        }
+    }
+
+    /// A fallback on macOS, missing what the app gives.
+    pub fn is_fallback(self) -> bool {
+        matches!(self, Way::TerminalNotifier | Way::Osascript)
+    }
+}
+
+pub fn send(note: &Note) -> Result<Way> {
     if cfg!(target_os = "linux") {
+        // notify-send has a summary line and a body, no subtitle.
+        let summary = if note.subtitle.is_empty() {
+            note.title.clone()
+        } else {
+            format!("{}: {}", note.title, note.subtitle)
+        };
         let status = Command::new("notify-send")
             .args(["--app-name", "gh-watch"])
-            .arg(format!("{}: {}", note.title, note.subtitle))
+            .arg(summary)
             .arg(&note.body)
             .status()
             .context("could not run notify-send")?;
         if !status.success() {
             bail!("notify-send failed ({status})");
         }
-        return Ok(());
+        return Ok(Way::NotifySend);
     }
 
-    if let Some(program) = app() {
-        let status = Command::new(program)
+    if !APP_FAILED.load(Ordering::Relaxed)
+        && let Some(program) = app()
+    {
+        let output = Command::new(program)
             .args(["--title", &note.title, "--subtitle", &note.subtitle])
             .args([
                 "--message",
@@ -44,11 +105,27 @@ pub fn send(note: &Note) -> Result<()> {
                 "--group",
                 &note.group,
             ])
-            .status();
-        match status {
-            Ok(status) if status.success() => return Ok(()),
-            Ok(status) => eprintln!("gh-watch app failed ({status}), trying the next way"),
-            Err(err) => eprintln!("could not run the gh-watch app ({err}), trying the next way"),
+            .output();
+        let (error, again) = match output {
+            Ok(out) if out.status.success() => {
+                if let Ok(mut e) = APP_ERROR.lock() {
+                    *e = None;
+                }
+                return Ok(Way::App);
+            }
+            Ok(out) => {
+                let error = failure(out.status, &out.stderr);
+                // Exit 1 is bad arguments, about this note only.
+                (error, out.status.code() != Some(1))
+            }
+            Err(err) => (format!("could not run it: {err}"), true),
+        };
+        eprintln!("gh-watch app failed ({error}), trying the next way");
+        if again {
+            APP_FAILED.store(true, Ordering::Relaxed);
+        }
+        if let Ok(mut e) = APP_ERROR.lock() {
+            *e = Some(error);
         }
     }
 
@@ -66,7 +143,7 @@ pub fn send(note: &Note) -> Result<()> {
             .args(["-sound", "Glass"])
             .status();
         match status {
-            Ok(status) if status.success() => return Ok(()),
+            Ok(status) if status.success() => return Ok(Way::TerminalNotifier),
             Ok(status) => eprintln!("terminal-notifier failed ({status}), using osascript"),
             Err(err) => eprintln!("could not run terminal-notifier ({err}), using osascript"),
         }
@@ -90,11 +167,11 @@ pub fn send(note: &Note) -> Result<()> {
     if !status.success() {
         bail!("osascript failed ({status})");
     }
-    Ok(())
+    Ok(Way::Osascript)
 }
 
 /// The gh-watch app's program, if it's installed (`macos/build.sh --install`).
-fn app() -> Option<PathBuf> {
+pub fn app() -> Option<PathBuf> {
     let program = "gh-watch.app/Contents/MacOS/gh-watch-notifier";
     dirs::home_dir()
         .map(|home| home.join("Applications"))
@@ -106,7 +183,7 @@ fn app() -> Option<PathBuf> {
 
 /// Where terminal-notifier is, if installed. Homebrew's folders are checked
 /// by name since scheduled runs don't have them on PATH.
-fn terminal_notifier() -> Option<PathBuf> {
+pub fn terminal_notifier() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .chain([

@@ -1,6 +1,6 @@
 [package]
 name = "gh-watch"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2024"
 description = "Know when GitHub issues you care about change, through the gh CLI: as a library, a CLI, or a gh extension"
 license = "MIT"
@@ -25,3 +25,4 @@ dirs = "7.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.1.8"
+toml_edit = "0.25.19"
