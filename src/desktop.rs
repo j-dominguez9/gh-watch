@@ -184,12 +184,5 @@ pub fn app() -> Option<PathBuf> {
 /// Where terminal-notifier is, if installed. Homebrew's folders are checked
 /// by name since scheduled runs don't have them on PATH.
 pub fn terminal_notifier() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
-        .chain([
-            PathBuf::from("/opt/homebrew/bin"),
-            PathBuf::from("/usr/local/bin"),
-        ])
-        .map(|dir| dir.join("terminal-notifier"))
-        .find(|program| program.is_file())
+    gh_watch::which::which("terminal-notifier", &gh_watch::which::homebrew())
 }

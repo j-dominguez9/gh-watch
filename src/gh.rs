@@ -303,6 +303,11 @@ fn is_empty_output(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Where the `gh` program is (see `gh_path`), for running it directly.
+pub fn program() -> Result<PathBuf> {
+    gh_path().context("GitHub CLI not found: install it (https://cli.github.com)")
+}
+
 /// Where gh is: the one running us (as a gh extension), on PATH, or in
 /// Homebrew's folders (for scheduled runs, whose PATH doesn't include them).
 fn gh_path() -> Option<PathBuf> {
@@ -311,14 +316,7 @@ fn gh_path() -> Option<PathBuf> {
     {
         return Some(gh);
     }
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
-        .chain([
-            PathBuf::from("/opt/homebrew/bin"),
-            PathBuf::from("/usr/local/bin"),
-        ])
-        .map(|dir| dir.join("gh"))
-        .find(|program| program.is_file())
+    crate::which::which("gh", &crate::which::homebrew())
 }
 
 #[cfg(test)]

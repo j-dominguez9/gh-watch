@@ -131,7 +131,7 @@ pub fn run(last_notified: Option<DateTime<Utc>>, send_test: bool) -> usize {
                     "has bug fixes"
                 },
                 env!("CARGO_PKG_VERSION"),
-                update::how_to_upgrade(&newer.version)
+                update::how_to_upgrade()
             ),
         ),
         Err(err) => report.note(

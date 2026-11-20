@@ -4,7 +4,10 @@
 //! interrupting anyone for. `doctor` mentions any newer release. A failed
 //! look (offline, say) is skipped without a word.
 
-use anyhow::{Context, Result};
+use std::path::Path;
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use gh_watch::gh;
 
@@ -15,7 +18,9 @@ use crate::state::State;
 const CHECK_EVERY: Duration = Duration::hours(24);
 
 /// When gh-watch can't tell how it was installed.
-const REINSTALL: &str = "reinstall gh-watch, then run `gh-watch setup`";
+/// (Not `setup` after: that would also add the repo you're in.)
+const REINSTALL: &str =
+    "reinstall gh-watch, then run `gh-watch install-app` and `gh-watch schedule`";
 
 /// A version newer than this one.
 pub struct Newer {
@@ -44,44 +49,159 @@ pub fn newer() -> Result<Option<Newer>> {
     )
 }
 
-/// The command that upgrades this install to `version` (then rebuilds the
-/// app and the schedule), if gh-watch can tell how it was installed.
-pub fn upgrade_command(version: &str) -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let cargo_bin = std::env::var_os("CARGO_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
-        .map(|cargo| cargo.join("bin"));
-    command_for(&exe, cargo_bin.as_deref(), version)
+/// How this gh-watch was installed, which decides how it upgrades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Install {
+    /// `gh extension install`: `gh extension upgrade` replaces it.
+    Extension,
+    /// `cargo install`: rebuilt from the release's tag.
+    Cargo,
+    /// Anything else (a build folder, say): it can't upgrade itself.
+    Unknown,
 }
 
-fn command_for(
-    exe: &std::path::Path,
-    cargo_bin: Option<&std::path::Path>,
-    version: &str,
-) -> Option<String> {
-    if exe.to_string_lossy().contains("/gh/extensions/") {
-        Some(String::from(
-            "gh extension upgrade gh-watch && gh watch setup",
-        ))
-    } else if cargo_bin.is_some_and(|bin| exe.starts_with(bin)) {
-        // That release exactly (not whatever's on main), even though a
-        // gh-watch is already installed.
-        Some(format!(
-            "cargo install --git {} --tag v{version} --force && gh-watch setup",
-            env!("CARGO_PKG_REPOSITORY")
-        ))
-    } else {
-        None
+impl Install {
+    /// This one, from where it runs.
+    pub fn this() -> Install {
+        std::env::current_exe().map_or(Install::Unknown, |exe| Install::at(&exe))
+    }
+
+    /// The install a gh-watch at `exe` is.
+    pub fn at(exe: &Path) -> Install {
+        Install::of(exe, gh_watch::which::cargo_bin().as_deref())
+    }
+
+    fn of(exe: &Path, cargo_bin: Option<&Path>) -> Install {
+        if exe.to_string_lossy().contains("/gh/extensions/") {
+            Install::Extension
+        } else if cargo_bin.is_some_and(|bin| exe.starts_with(bin)) {
+            Install::Cargo
+        } else {
+            Install::Unknown
+        }
     }
 }
 
-/// How to upgrade to `version`, as a fix to show: "run `...`".
-pub fn how_to_upgrade(version: &str) -> String {
-    match upgrade_command(version) {
+/// The command that upgrades this install, if it can upgrade itself.
+pub fn upgrade_command() -> Option<&'static str> {
+    match Install::this() {
+        Install::Extension => Some("gh watch upgrade"),
+        Install::Cargo => Some("gh-watch upgrade"),
+        Install::Unknown => None,
+    }
+}
+
+/// How to upgrade, as a fix to show: "run `...`".
+pub fn how_to_upgrade() -> String {
+    match upgrade_command() {
         Some(command) => format!("run `{command}`"),
         None => REINSTALL.to_string(),
     }
+}
+
+/// `gh watch upgrade`: gets the newest release, then has it rebuild the
+/// app and reload the schedule. Not `setup`, which would also add the repo
+/// you happen to be in to the config.
+pub fn upgrade() -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    let Some(newer) = newer()? else {
+        println!("gh-watch {current} is the latest.");
+        return Ok(());
+    };
+    let exe = std::env::current_exe().context("could not tell where gh-watch is")?;
+    println!("Upgrading gh-watch {current} to {}...", newer.version);
+    match Install::at(&exe) {
+        Install::Extension => {
+            run(Command::new(gh::program()?).args(["extension", "upgrade", "gh-watch"]))
+                .with_context(|| {
+                    // gh won't upgrade an extension pinned to a version, or
+                    // one installed from a local folder.
+                    let repo =
+                        env!("CARGO_PKG_REPOSITORY").trim_start_matches("https://github.com/");
+                    format!(
+                        "gh couldn't upgrade it (see above). If it was installed pinned to a \
+                         version or from a folder, reinstall it: `gh extension remove gh-watch \
+                         && gh extension install {repo}`, then `gh watch install-app` and \
+                         `gh watch schedule`"
+                    )
+                })?
+        }
+        Install::Cargo => {
+            println!("(Building it from source takes a minute or two.)");
+            let cargo = gh_watch::which::which(
+                "cargo",
+                &gh_watch::which::cargo_bin().into_iter().collect::<Vec<_>>(),
+            )
+            .context("cargo not found: is Rust installed (rustup)?")?;
+            run(Command::new(cargo).args([
+                "install",
+                "--git",
+                env!("CARGO_PKG_REPOSITORY"),
+                "--tag",
+                &format!("v{}", newer.version),
+                "--force",
+            ]))?
+        }
+        Install::Unknown => bail!(
+            "this gh-watch wasn't installed as a gh extension or with cargo, so it can't \
+             upgrade itself: {REINSTALL}"
+        ),
+    }
+
+    // The new binary is where the old one was.
+    let out = Command::new(&exe)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("could not run the new gh-watch at {}", exe.display()))?;
+    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if version != format!("gh-watch {}", newer.version) {
+        bail!(
+            "the upgrade ran, but this is still {version:?} rather than gh-watch {}; try \
+             again, or {REINSTALL}",
+            newer.version
+        );
+    }
+
+    // Its own commands rebuild what was there: this (old) code would build
+    // the old app. Only what was installed (a schedule you removed stays
+    // removed), and a step that fails doesn't stop the other, like setup.
+    // Both commands exist in every version, so this works across them.
+    let mut warnings = 0;
+    if cfg!(target_os = "macos") {
+        let steps = [
+            (crate::desktop::app().is_some(), "install-app", "the app"),
+            (crate::schedule::is_installed(), "schedule", "the schedule"),
+        ];
+        for (installed, command, what) in steps {
+            if installed && let Err(err) = run(Command::new(&exe).arg(command)) {
+                println!("  ! Couldn't rebuild {what} ({err:#}): run `gh watch {command}`.");
+                warnings += 1;
+            }
+        }
+    }
+    println!(
+        "Upgraded to gh-watch {}{}. What's new: {}",
+        newer.version,
+        if warnings > 0 {
+            " (with the warnings above)"
+        } else {
+            ""
+        },
+        newer.url
+    );
+    Ok(())
+}
+
+/// Runs `command`, showing its output, and fails if it does.
+fn run(command: &mut Command) -> Result<()> {
+    let program = command.get_program().to_string_lossy().into_owned();
+    let status = command
+        .status()
+        .with_context(|| format!("could not run {program}"))?;
+    if !status.success() {
+        bail!("{program} failed ({status})");
+    }
+    Ok(())
 }
 
 /// For `notify`: a notification about a newer minor release, when it's
@@ -104,7 +224,7 @@ pub fn note(state: &mut State, now: DateTime<Utc>) -> Option<(Note, String)> {
     if announced.as_deref() == Some(minor.as_str()) {
         return None;
     }
-    let body = match upgrade_command(&newer.version) {
+    let body = match upgrade_command() {
         Some(command) => format!("Upgrade: `{command}`"),
         None => format!("{}{}.", REINSTALL[..1].to_uppercase(), &REINSTALL[1..]),
     };
@@ -168,30 +288,22 @@ mod tests {
     }
 
     #[test]
-    fn the_upgrade_command_fits_the_install() {
-        use std::path::Path;
+    fn tells_how_it_was_installed() {
         let bin = Path::new("/Users/me/.cargo/bin");
         assert_eq!(
-            command_for(
+            Install::of(
                 Path::new("/Users/me/.local/share/gh/extensions/gh-watch/gh-watch"),
-                Some(bin),
-                "0.2.0"
-            )
-            .as_deref(),
-            Some("gh extension upgrade gh-watch && gh watch setup")
-        );
-        assert!(
-            command_for(
-                Path::new("/Users/me/.cargo/bin/gh-watch"),
-                Some(bin),
-                "0.2.0"
-            )
-            .is_some_and(|c| c.starts_with("cargo install --git https://github.com/")
-                && c.contains("--tag v0.2.0 --force"))
+                Some(bin)
+            ),
+            Install::Extension
         );
         assert_eq!(
-            command_for(Path::new("/tmp/build/gh-watch"), Some(bin), "0.2.0"),
-            None
+            Install::of(Path::new("/Users/me/.cargo/bin/gh-watch"), Some(bin)),
+            Install::Cargo
+        );
+        assert_eq!(
+            Install::of(Path::new("/tmp/build/gh-watch"), Some(bin)),
+            Install::Unknown
         );
     }
 
