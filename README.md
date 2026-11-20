@@ -77,6 +77,25 @@ Each step of `setup` also works on its own: `gh watch install-app`
 rebuilds the app (say, after updating gh-watch), `gh watch schedule`
 reinstalls the schedule, and `gh watch schedule --remove` stops it.
 
+## Not working?
+
+```sh
+gh watch doctor
+```
+
+checks each thing notifications need, with the fix for anything that's
+wrong: gh and its login, the config, the app and whether macOS lets it
+notify, and the schedule (including a run that failed, or a schedule
+pointing at an old gh-watch). Then it sends a test notification and says
+how it went out.
+
+A notification without the cat icon, which does nothing when clicked,
+came without the app (plain macOS notifications): `doctor` says why.
+Usually the app couldn't be built (`xcode-select --install`, then `gh watch
+install-app`) or notifications for it are off (System Settings →
+Notifications → gh-watch). After updating gh-watch, run `gh watch
+install-app` and `gh watch schedule` again.
+
 ## Config
 
 Optional, in `~/.config/gh-watch/config.toml`, so you don't need flags:

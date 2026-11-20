@@ -9,6 +9,7 @@
 mod app;
 mod config;
 mod desktop;
+mod doctor;
 mod schedule;
 
 use std::path::PathBuf;
@@ -64,6 +65,14 @@ enum Cmd {
     /// Build and install gh-watch's notifier app (macOS), so notifications
     /// show under its own name and icon. Needs Apple's command line tools.
     InstallApp,
+    /// Check that notifications will work, with the fix for anything that
+    /// won't: gh, the config, the app and its permission (macOS), and the
+    /// schedule. Then send a test notification and say how it went out.
+    Doctor {
+        /// Skip the test notification.
+        #[arg(long)]
+        no_test: bool,
+    },
     /// Run `notify` every 30 minutes (macOS, through launchd).
     Schedule {
         /// Stop and remove the schedule instead.
@@ -95,6 +104,10 @@ fn main() -> Result<()> {
                 "Installed {}. Allow notifications if macOS asks.",
                 path.display()
             );
+            return Ok(());
+        }
+        Cmd::Doctor { no_test } => {
+            doctor::run(load_state()?.last_notified, !no_test);
             return Ok(());
         }
         Cmd::Schedule { remove: true } => {
@@ -146,7 +159,9 @@ fn main() -> Result<()> {
             notify(&repos, &watch, window, dry_run)
         }
         Cmd::Setup => setup(&repos),
-        Cmd::InstallApp | Cmd::Schedule { .. } => unreachable!("handled above"),
+        Cmd::InstallApp | Cmd::Doctor { .. } | Cmd::Schedule { .. } => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -173,8 +188,10 @@ fn setup(repos: &[String]) -> Result<()> {
                 path.display()
             ),
             Err(err) => println!(
-                "  ! App: not installed ({err:#}). Notifications will use terminal-notifier \
-                 if it's installed (brew install terminal-notifier), or plain ones."
+                "  ! App: not installed ({err:#}).\n    Notifications will still come, but \
+                 without the cat icon, and clicking one won't open the issue (unless \
+                 terminal-notifier is installed). Fix that first, then run \
+                 `gh watch install-app`; `gh watch doctor` checks everything."
             ),
         }
     }
@@ -372,6 +389,7 @@ fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bo
             group: String::from("summary"),
         });
     }
+    let mut said_fallback = false;
     for note in &notes {
         if dry_run {
             println!(
@@ -380,7 +398,15 @@ fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bo
                 note.body.replace('\n', " / ")
             );
         } else {
-            desktop::send(note)?;
+            let way = desktop::send(note)?;
+            // Said once a run, so the log shows why there's no cat.
+            if way.is_fallback() && !said_fallback {
+                eprintln!(
+                    "Sent with {}: see `gh watch doctor` for why the app wasn't used.",
+                    way.describe()
+                );
+                said_fallback = true;
+            }
         }
     }
     if trial {

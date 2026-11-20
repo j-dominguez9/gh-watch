@@ -28,7 +28,7 @@ pub fn install() -> Result<PathBuf> {
     if !cfg!(target_os = "macos") {
         bail!("the gh-watch app is for macOS; on Linux, notifications use notify-send");
     }
-    for tool in ["swiftc", "swift", "iconutil", "codesign"] {
+    for tool in TOOLS {
         if !runs(tool) {
             bail!(
                 "{tool} not found: install Apple's command line tools with `xcode-select --install`, then try again"
@@ -123,6 +123,13 @@ fn build(work: &Path) -> Result<PathBuf> {
 
     Ok(app)
 }
+
+/// The command line tools building the app needs that aren't installed.
+pub fn missing_tools() -> Vec<&'static str> {
+    TOOLS.into_iter().filter(|tool| !runs(tool)).collect()
+}
+
+const TOOLS: [&str; 4] = ["swiftc", "swift", "iconutil", "codesign"];
 
 /// Whether `tool` can be run at all.
 fn runs(tool: &str) -> bool {

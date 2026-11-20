@@ -24,7 +24,32 @@ pub struct Note {
 /// permission nobody answers, each try would wait out its timeout again.
 static APP_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub fn send(note: &Note) -> Result<()> {
+/// How a notification went out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Way {
+    App,
+    TerminalNotifier,
+    Osascript,
+    NotifySend,
+}
+
+impl Way {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Way::App => "the gh-watch app",
+            Way::TerminalNotifier => "terminal-notifier (no cat icon, but clicks open the issue)",
+            Way::Osascript => "plain macOS notifications (no cat icon, and clicks open nothing)",
+            Way::NotifySend => "notify-send",
+        }
+    }
+
+    /// A fallback on macOS, missing what the app gives.
+    pub fn is_fallback(self) -> bool {
+        matches!(self, Way::TerminalNotifier | Way::Osascript)
+    }
+}
+
+pub fn send(note: &Note) -> Result<Way> {
     if cfg!(target_os = "linux") {
         let status = Command::new("notify-send")
             .args(["--app-name", "gh-watch"])
@@ -35,7 +60,7 @@ pub fn send(note: &Note) -> Result<()> {
         if !status.success() {
             bail!("notify-send failed ({status})");
         }
-        return Ok(());
+        return Ok(Way::NotifySend);
     }
 
     if !APP_FAILED.load(std::sync::atomic::Ordering::Relaxed)
@@ -53,7 +78,7 @@ pub fn send(note: &Note) -> Result<()> {
             ])
             .status();
         match status {
-            Ok(status) if status.success() => return Ok(()),
+            Ok(status) if status.success() => return Ok(Way::App),
             Ok(status) => eprintln!("gh-watch app failed ({status}), trying the next way"),
             Err(err) => eprintln!("could not run the gh-watch app ({err}), trying the next way"),
         }
@@ -74,7 +99,7 @@ pub fn send(note: &Note) -> Result<()> {
             .args(["-sound", "Glass"])
             .status();
         match status {
-            Ok(status) if status.success() => return Ok(()),
+            Ok(status) if status.success() => return Ok(Way::TerminalNotifier),
             Ok(status) => eprintln!("terminal-notifier failed ({status}), using osascript"),
             Err(err) => eprintln!("could not run terminal-notifier ({err}), using osascript"),
         }
@@ -98,11 +123,11 @@ pub fn send(note: &Note) -> Result<()> {
     if !status.success() {
         bail!("osascript failed ({status})");
     }
-    Ok(())
+    Ok(Way::Osascript)
 }
 
 /// The gh-watch app's program, if it's installed (`macos/build.sh --install`).
-fn app() -> Option<PathBuf> {
+pub fn app() -> Option<PathBuf> {
     let program = "gh-watch.app/Contents/MacOS/gh-watch-notifier";
     dirs::home_dir()
         .map(|home| home.join("Applications"))
@@ -114,7 +139,7 @@ fn app() -> Option<PathBuf> {
 
 /// Where terminal-notifier is, if installed. Homebrew's folders are checked
 /// by name since scheduled runs don't have them on PATH.
-fn terminal_notifier() -> Option<PathBuf> {
+pub fn terminal_notifier() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .chain([

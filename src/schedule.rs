@@ -69,6 +69,53 @@ pub fn remove() -> Result<bool> {
     Ok(true)
 }
 
+/// The job as launchd sees it, from `launchctl print`.
+#[derive(Debug, Default, PartialEq)]
+pub struct JobStatus {
+    /// The gh-watch it runs.
+    pub program: Option<String>,
+    /// "0", or "78: EX_CONFIG"; None if it hasn't run since it was loaded.
+    pub last_exit: Option<String>,
+    /// launchd couldn't start it at all (say, the binary was replaced and
+    /// no longer matches what launchd recorded): `gh watch schedule` fixes
+    /// that.
+    pub spawn_failed: bool,
+}
+
+/// Whether the job's file is there (it may still not be loaded).
+pub fn is_installed() -> bool {
+    plist_path().is_ok_and(|p| p.exists())
+}
+
+/// The loaded job's status, or None if launchd doesn't have it.
+pub fn status() -> Option<JobStatus> {
+    let output = Command::new("launchctl")
+        .arg("print")
+        .arg(format!("{}/{LABEL}", domain().ok()?))
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| parse_status(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_status(text: &str) -> JobStatus {
+    let mut status = JobStatus::default();
+    for line in text.lines().map(str::trim) {
+        if let Some(program) = line.strip_prefix("program = ") {
+            status.program = Some(program.to_string());
+        } else if let Some(code) = line.strip_prefix("last exit code = ") {
+            if code != "(never exited)" {
+                status.last_exit = Some(code.to_string());
+            }
+        } else if line == "job state = spawn failed" {
+            status.spawn_failed = true;
+        }
+    }
+    status
+}
+
 fn macos_only() -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!(
@@ -128,6 +175,23 @@ fn xml_escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_launchctl_print() {
+        let text = "gui/501/com.gh-watch.notify = {\n\tprogram = /Users/me/.cargo/bin/gh-watch\n\
+                    \tlast exit code = 78: EX_CONFIG\n\t\tjob state = spawn failed\n}";
+        assert_eq!(
+            parse_status(text),
+            JobStatus {
+                program: Some(String::from("/Users/me/.cargo/bin/gh-watch")),
+                last_exit: Some(String::from("78: EX_CONFIG")),
+                spawn_failed: true,
+            }
+        );
+        let fresh = parse_status("\tlast exit code = (never exited)\n");
+        assert_eq!(fresh.last_exit, None);
+        assert!(!fresh.spawn_failed);
+    }
 
     #[test]
     fn plist_runs_notify_with_the_given_binary() {

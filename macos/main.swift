@@ -85,6 +85,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // `--check` (for `gh watch doctor`): say whether notifications are
+        // allowed, without posting one. Prints the answer; exits 0 if
+        // they are, 2 if not.
+        if CommandLine.arguments.dropFirst().first == "--check" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { fail(3, "timed out") }
+            center.getNotificationSettings { settings in
+                switch settings.authorizationStatus {
+                case .authorized, .provisional:
+                    print("allowed")
+                    exit(0)
+                case .denied:
+                    print("turned off")
+                case .notDetermined:
+                    print("not asked yet")
+                default:
+                    print("unknown")
+                }
+                exit(2)
+            }
+            return
+        }
         if let options = parseOptions(Array(CommandLine.arguments.dropFirst())) {
             // The first time, this waits for you to answer the permission
             // prompt. Don't hang forever if nobody's there to answer.
