@@ -119,18 +119,29 @@ pub fn me() -> Result<String> {
 
 /// Every label in `repo` starting with `prefix`, lowercased.
 pub fn labels(repo: &str, prefix: &str) -> Result<HashSet<String>> {
+    let names = label_names(&["--search", prefix], repo)?;
+    let prefix = prefix.to_lowercase();
+    Ok(names
+        .into_iter()
+        .filter(|name| name.starts_with(&prefix))
+        .collect())
+}
+
+/// Every label in `repo`, lowercased.
+pub fn all_labels(repo: &str) -> Result<HashSet<String>> {
+    label_names(&[], repo)
+}
+
+fn label_names(extra: &[&str], repo: &str) -> Result<HashSet<String>> {
     #[derive(Deserialize)]
     struct Named {
         name: String,
     }
-    let labels: Vec<Named> = gh(&[
-        "label", "list", "-R", repo, "--search", prefix, "--limit", "2000", "--json", "name",
-    ])?;
-    Ok(labels
-        .into_iter()
-        .map(|l| l.name.to_lowercase())
-        .filter(|name| name.starts_with(&prefix.to_lowercase()))
-        .collect())
+    let mut args = vec!["label", "list", "-R", repo];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["--limit", "2000", "--json", "name"]);
+    let labels: Vec<Named> = gh_list(&args)?;
+    Ok(labels.into_iter().map(|l| l.name.to_lowercase()).collect())
 }
 
 /// Issues with `label`: all open ones, and the ones closed on or after
@@ -256,14 +267,24 @@ fn gh<T: DeserializeOwned>(args: &[&str]) -> Result<T> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("gh {} failed: {}", args[..2].join(" "), stderr.trim());
     }
-    // A list with nothing in it can come back as no output at all (say,
-    // `gh label list --search` matching nothing), rather than `[]`.
-    let stdout: &[u8] = if output.stdout.iter().all(u8::is_ascii_whitespace) {
-        b"[]"
-    } else {
-        &output.stdout
-    };
-    serde_json::from_slice(stdout).context("could not parse gh's output")
+    serde_json::from_slice(&output.stdout).context("could not parse gh's output")
+}
+
+/// `gh` for a list. `gh label list` prints nothing at all, rather than
+/// `[]`, when nothing matches, so no output is an empty list here.
+fn gh_list<T: DeserializeOwned>(args: &[&str]) -> Result<Vec<T>> {
+    match gh::<Vec<T>>(args) {
+        Err(err) if is_empty_output(&err) => Ok(Vec::new()),
+        result => result,
+    }
+}
+
+fn is_empty_output(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<serde_json::Error>()
+            .is_some_and(|e| e.is_eof() && e.line() == 1 && e.column() == 0)
+    })
 }
 
 /// Where gh is: the one running us (as a gh extension), on PATH, or in
@@ -287,6 +308,19 @@ fn gh_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_output_is_an_empty_list_but_bad_output_is_an_error() {
+        let parse = |bytes: &[u8]| {
+            serde_json::from_slice::<Vec<String>>(bytes)
+                .map_err(anyhow::Error::from)
+                .context("could not parse gh's output")
+                .unwrap_err()
+        };
+        assert!(is_empty_output(&parse(b"")));
+        assert!(!is_empty_output(&parse(b"{not json")));
+        assert!(!is_empty_output(&parse(b"[1, ")));
+    }
 
     /// The shape `gh issue list --json` returns, trimmed.
     const SAMPLE: &str = r#"[{

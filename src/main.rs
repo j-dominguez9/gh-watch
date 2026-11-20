@@ -103,9 +103,18 @@ enum Cmd {
 #[derive(Subcommand)]
 enum ConfigAction {
     /// Start watching the `--label`s and `--repo`s given.
-    Add,
+    Add {
+        /// Also issues you're involved in (opened, assigned, mentioned,
+        /// commented).
+        #[arg(long)]
+        involved: bool,
+    },
     /// Stop watching the `--label`s and `--repo`s given.
-    Remove,
+    Remove {
+        /// Stop watching issues you're involved in (labels only).
+        #[arg(long)]
+        involved: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -190,6 +199,14 @@ fn main() -> Result<()> {
 /// setup --label customer-acme` starts watching another label, keeping
 /// everything already there.
 fn setup(cli: &Cli, repos: &[String]) -> Result<()> {
+    // The repo you're in counts even when the config has others, so
+    // running setup in a second repo adds it.
+    let here = if cli.repos.is_empty() {
+        gh::current_repo().ok()
+    } else {
+        None
+    };
+    let repos = here.map_or_else(|| repos.to_vec(), |repo| vec![repo]);
     println!("Setting up gh-watch for {}:", repos.join(", "));
 
     // 1. Remember what to watch, so scheduled runs (which start outside
@@ -197,7 +214,7 @@ fn setup(cli: &Cli, repos: &[String]) -> Result<()> {
     let config_path = Config::path()?;
     let existed = Config::exists()?;
     let mut config = Config::load()?;
-    let mut changed = config.add(repos, &cli.labels);
+    let mut changed = config.add(&repos, &cli.labels);
     if cli.no_involved && config.involved {
         config.involved = false;
         changed = true;
@@ -209,7 +226,7 @@ fn setup(cli: &Cli, repos: &[String]) -> Result<()> {
     } else {
         println!("  ✓ Config: keeping your {}", config_path.display());
     }
-    check_labels(&config, &cli.labels);
+    check_labels(&config, &cli.labels, &repos);
 
     // 2. The notifier app, on macOS.
     if cfg!(target_os = "macos") {
@@ -258,27 +275,66 @@ fn setup(cli: &Cli, repos: &[String]) -> Result<()> {
 fn config_command(cli: &Cli, action: Option<&ConfigAction>) -> Result<()> {
     let path = Config::path()?;
     let mut config = Config::load()?;
-    match action {
-        None => {}
-        Some(action) => {
-            if cli.labels.is_empty() && cli.repos.is_empty() {
-                bail!(
-                    "say what to change: --label <name> or --repo owner/name (repeat for several)"
-                );
-            }
-            match action {
-                ConfigAction::Add => {
-                    if !config.add(&cli.repos, &cli.labels) {
-                        println!("Already watching all of that.");
-                    }
-                    check_labels(&config, &cli.labels);
+    if let Some(action) = action {
+        let (ConfigAction::Add { involved } | ConfigAction::Remove { involved }) = *action;
+        if cli.no_involved {
+            bail!(
+                "to stop watching issues you're involved in, use `gh watch config remove --involved`"
+            );
+        }
+        if cli.labels.is_empty() && cli.repos.is_empty() && !involved {
+            bail!(
+                "say what to change: --label <name>, --repo owner/name (repeat for several), \
+                 or --involved"
+            );
+        }
+        let changed = match action {
+            ConfigAction::Add { .. } => {
+                let mut changed = config.add(&cli.repos, &cli.labels);
+                if involved && !config.involved {
+                    config.involved = true;
+                    changed = true;
                 }
-                ConfigAction::Remove => {
-                    for name in config.remove(&cli.repos, &cli.labels) {
-                        println!("Wasn't watching {name:?}.");
+                if !changed {
+                    println!("Already watching all of that.");
+                }
+                check_labels(&config, &cli.labels, &cli.repos);
+                changed
+            }
+            ConfigAction::Remove { .. } => {
+                let missing = config.remove(&cli.repos, &cli.labels);
+                for name in &missing {
+                    println!("Wasn't watching {name:?}.");
+                }
+                let mut changed = missing.len() < cli.repos.len() + cli.labels.len();
+                if involved && config.involved {
+                    config.involved = false;
+                    changed = true;
+                }
+                // Scheduled runs fail on a config that watches nothing, so
+                // don't save one.
+                if changed {
+                    if config.repos.is_empty() {
+                        bail!(
+                            "that would leave no repo to watch, and scheduled runs would fail. \
+                             Add another first (`gh watch config add --repo owner/name`), or \
+                             stop gh-watch with `gh watch schedule --remove`."
+                        );
+                    }
+                    if config.labels.is_empty() && !config.involved {
+                        bail!(
+                            "that would leave nothing to watch (no labels, and not issues \
+                             you're involved in), and scheduled runs would fail. Keep \
+                             something, or stop gh-watch with `gh watch schedule --remove`."
+                        );
                     }
                 }
+                changed
             }
+        };
+        // Only when something changed: saving rewrites the file, and its
+        // hand-written comments with it.
+        if changed {
             config.save()?;
         }
     }
@@ -292,19 +348,33 @@ fn config_command(cli: &Cli, action: Option<&ConfigAction>) -> Result<()> {
     Ok(())
 }
 
-/// Warns about labels that don't exist in a watched repo: a typo would
-/// otherwise quietly match nothing.
-fn check_labels(config: &Config, labels: &[String]) {
-    for label in labels {
-        for repo in &config.repos {
-            match gh::labels(repo, label) {
-                Ok(found) if found.contains(&label.to_lowercase()) => {}
-                Ok(_) => println!(
-                    "  ! {repo} has no label {label:?}, so nothing will match it. \
-                     See `gh label list -R {repo}`."
-                ),
-                Err(err) => println!("  ! Couldn't check label {label:?} in {repo} ({err:#})"),
+/// Warns about watched labels a watched repo doesn't have: a typo would
+/// otherwise quietly match nothing. Checks the `new_labels` in every repo,
+/// and every label in the `new_repos`; one label listing per repo.
+fn check_labels(config: &Config, new_labels: &[String], new_repos: &[String]) {
+    let is_in = |list: &[String], name: &str| list.iter().any(|x| x.eq_ignore_ascii_case(name));
+    for repo in &config.repos {
+        let new_repo = is_in(new_repos, repo);
+        let check: Vec<&String> = config
+            .labels
+            .iter()
+            .filter(|label| new_repo || is_in(new_labels, label))
+            .collect();
+        if check.is_empty() {
+            continue;
+        }
+        match gh::all_labels(repo) {
+            Ok(found) => {
+                for label in check {
+                    if !found.contains(&label.to_lowercase()) {
+                        println!(
+                            "  ! {repo} has no label {label:?}, so nothing will match it there. \
+                             See `gh label list -R {repo}`."
+                        );
+                    }
+                }
             }
+            Err(err) => println!("  ! Couldn't check the labels in {repo} ({err:#})"),
         }
     }
 }

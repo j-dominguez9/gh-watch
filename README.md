@@ -110,7 +110,12 @@ gh watch config                               # what's watched, and where the fi
 gh watch config add --label customer-acme     # also issues with this label
 gh watch config add --repo owner/other        # another repo
 gh watch config remove --label customer-acme
+gh watch config remove --involved             # only labels, not issues you're in
 ```
+
+It won't save a config that watches nothing (no repo, or no labels and not
+issues you're involved in), since every scheduled run would fail on it.
+Running `gh watch setup` in another repo adds that repo.
 
 A label that doesn't exist in a watched repo gets a warning, since a typo
 would otherwise match nothing. First time, `gh watch setup --label

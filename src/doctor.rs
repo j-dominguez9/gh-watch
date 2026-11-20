@@ -24,6 +24,11 @@ impl Report {
         println!("  ✓ {what}: {detail}");
     }
 
+    /// Worth knowing, but not a problem of its own.
+    fn note(&self, what: &str, detail: &str) {
+        println!("  - {what}: {detail}");
+    }
+
     fn problem(&mut self, what: &str, detail: &str, fix: &str) {
         self.problems += 1;
         println!("  ! {what}: {detail}\n      Fix: {fix}");
@@ -69,8 +74,7 @@ pub fn run(last_notified: Option<DateTime<Utc>>, send_test: bool) -> usize {
     let mut scheduled = false;
     if cfg!(target_os = "macos") {
         app_ok = check_app(&mut report);
-        check_schedule(&mut report);
-        scheduled = schedule::is_installed();
+        scheduled = check_schedule(&mut report);
     }
 
     match last_notified {
@@ -182,7 +186,10 @@ fn check_app(report: &mut Report) -> bool {
         ),
         Ok(out) => report.problem(
             "Permission",
-            &format!("couldn't tell ({}{})", out.status, stderr_note(&out.stderr)),
+            &format!(
+                "couldn't tell ({})",
+                desktop::failure(out.status, &out.stderr)
+            ),
             "run `gh watch install-app`",
         ),
         Err(err) => report.problem(
@@ -208,7 +215,15 @@ fn check_app(report: &mut Report) -> bool {
 }
 
 /// The launchd job: there, running this gh-watch, and its last run fine.
-fn check_schedule(report: &mut Report) {
+/// Returns whether it all checked out, so a stale "last check" isn't
+/// counted as a second problem when the schedule already is one.
+fn check_schedule(report: &mut Report) -> bool {
+    let before = report.problems;
+    schedule_lines(report);
+    report.problems == before
+}
+
+fn schedule_lines(report: &mut Report) {
     let fix = "run `gh watch schedule`";
     if !schedule::is_installed() {
         report.problem(
@@ -277,12 +292,20 @@ fn send_test_note(report: &mut Report, app_ok: bool) {
         group: String::from("gh-watch"),
     };
     match desktop::send(&note) {
-        Ok(Way::App) | Ok(Way::NotifySend) => {
+        Ok(Way::App | Way::NotifySend) if app_ok => {
             report.ok(
                 "Test",
                 "sent: you should see it now, and a click opens gh-watch's page",
             );
         }
+        // Sent by the app, but a problem above (say, permission to deliver
+        // quietly) may keep it out of sight: don't promise a banner, and
+        // don't count that problem twice.
+        Ok(Way::App | Way::NotifySend) => report.note(
+            "Test",
+            "sent by the app, but it may not show as a banner until the problems above \
+             are fixed (look in Notification Center)",
+        ),
         Ok(way) => match desktop::app_error().filter(|_| app_ok) {
             // The app looked fine but failed when it was used.
             Some(error) => report.problem(
@@ -312,14 +335,5 @@ fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
-    }
-}
-
-fn stderr_note(stderr: &[u8]) -> String {
-    let text = String::from_utf8_lossy(stderr).trim().to_string();
-    if text.is_empty() {
-        text
-    } else {
-        format!(": {text}")
     }
 }

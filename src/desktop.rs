@@ -32,6 +32,17 @@ static APP_FAILED: AtomicBool = AtomicBool::new(false);
 static APP_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 /// Why the app failed the last time it was tried, if it did.
+/// How a program failed: "exit status: 2: not allowed", or just the
+/// status when it said nothing.
+pub fn failure(status: std::process::ExitStatus, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    if stderr.is_empty() {
+        status.to_string()
+    } else {
+        format!("{status}: {stderr}")
+    }
+}
+
 pub fn app_error() -> Option<String> {
     APP_ERROR.lock().ok().and_then(|e| e.clone())
 }
@@ -97,12 +108,7 @@ pub fn send(note: &Note) -> Result<Way> {
                 return Ok(Way::App);
             }
             Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                let error = if stderr.is_empty() {
-                    format!("{}", out.status)
-                } else {
-                    format!("{}: {stderr}", out.status)
-                };
+                let error = failure(out.status, &out.stderr);
                 // Exit 1 is bad arguments, about this note only.
                 (error, out.status.code() != Some(1))
             }
