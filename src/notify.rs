@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::desktop::{self, Note};
 use crate::message;
 use crate::state::{self, Plan, State};
+use crate::update;
 
 /// At most this many notifications per run, the last a summary when
 /// there are more.
@@ -213,7 +214,6 @@ pub fn notify(window: Option<Duration>, dry_run: bool) -> Result<()> {
     if trial {
         return Ok(());
     }
-
     // Whatever couldn't be read hasn't been reported, so keep the clock
     // where it is and look at the same window again next time (what was
     // sent isn't repeated), up to HOLD_AT_MOST.
@@ -235,6 +235,15 @@ pub fn notify(window: Option<Duration>, dry_run: bool) -> Result<()> {
     // What's older than the clock can't come back, so it needn't be kept.
     let clock = state.last_notified.unwrap_or(now);
     state.sent.retain(|_, at| *at > clock);
+    // Saved before looking for a newer gh-watch: that's a network call
+    // that could hang, and mustn't cost what this run sent.
+    state.save()?;
+    // A newer minor release, once; remembered only once it's sent.
+    if let Some((note, minor)) = update::note(&mut state, now)
+        && desktop::send(&note).is_ok()
+    {
+        state.update_announced = Some(minor);
+    }
     state.save()
 }
 

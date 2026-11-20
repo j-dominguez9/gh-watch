@@ -36,6 +36,9 @@ func parseOptions(_ args: [String]) -> Options? {
     var rest = args[...]
     while let flag = rest.popFirst() {
         if !flag.hasPrefix("--") {
+            // Anything else is a mistake: failing says so, where skipping it
+            // would look like a click launch and "succeed" with nothing shown.
+            guard flag.hasPrefix("-") else { fail(1, "unexpected argument \(flag)") }
             // A system flag, and its value if it has one.
             if flag.hasPrefix("-NS") || flag.hasPrefix("-Apple"),
                 let next = rest.first, !next.hasPrefix("-")

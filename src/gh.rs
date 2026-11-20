@@ -211,6 +211,22 @@ pub fn involved(repo: &str, since: DateTime<Utc>) -> Result<Vec<Issue>> {
     ])
 }
 
+/// A published release.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Release {
+    /// The tag, e.g. "v0.1.5".
+    #[serde(rename = "tag_name")]
+    pub tag: String,
+    /// Its page on GitHub.
+    #[serde(rename = "html_url")]
+    pub url: String,
+}
+
+/// `repo`'s newest release (drafts and prereleases left out).
+pub fn latest_release(repo: &str) -> Result<Release> {
+    gh(&["api", &format!("repos/{repo}/releases/latest")])
+}
+
 /// The repo of the current directory, as owner/name.
 pub fn current_repo() -> Result<String> {
     #[derive(Deserialize)]
