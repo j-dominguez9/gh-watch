@@ -74,8 +74,9 @@ Clicking a notification opens the comment or issue. On Linux they come
 from `notify-send`.
 
 Each step of `setup` also works on its own: `gh watch install-app`
-rebuilds the app (say, after updating gh-watch), `gh watch schedule`
-reinstalls the schedule, and `gh watch schedule --remove` stops it.
+rebuilds the app, `gh watch schedule` reinstalls the schedule, and `gh
+watch schedule --remove` stops it. Running `setup` again does all of it
+and is safe to repeat.
 
 ## Not working?
 
@@ -93,12 +94,30 @@ A notification without the cat icon, which does nothing when clicked,
 came without the app (plain macOS notifications): `doctor` says why.
 Usually the app couldn't be built (`xcode-select --install`, then `gh watch
 install-app`) or notifications for it are off (System Settings →
-Notifications → gh-watch). After updating gh-watch, run `gh watch
-install-app` and `gh watch schedule` again.
+Notifications → gh-watch).
+
+After updating gh-watch (`gh extension upgrade gh-watch`), run `gh watch
+setup` again: it keeps your config and where it left off, rebuilds the app
+from the new version, and reloads the schedule.
 
 ## Config
 
-Optional, in `~/.config/gh-watch/config.toml`, so you don't need flags:
+`setup` writes it: the repo, and issues you're involved in. To watch more,
+or less:
+
+```sh
+gh watch config                               # what's watched, and where the file is
+gh watch config add --label customer-acme     # also issues with this label
+gh watch config add --repo owner/other        # another repo
+gh watch config remove --label customer-acme
+```
+
+A label that doesn't exist in a watched repo gets a warning, since a typo
+would otherwise match nothing. First time, `gh watch setup --label
+customer-acme` does both at once.
+
+It's `~/.config/gh-watch/config.toml`, which you can also edit by hand
+(`config add` and `remove` rewrite it with the standard comments):
 
 ```toml
 # Repos to watch, as owner/name. Default: the repo you run it in.

@@ -65,6 +65,12 @@ enum Cmd {
     /// Build and install gh-watch's notifier app (macOS), so notifications
     /// show under its own name and icon. Needs Apple's command line tools.
     InstallApp,
+    /// Show what's watched, or change it: `config add --label customer-acme`
+    /// or `config remove --label customer-acme` (also `--repo owner/name`).
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
     /// Check that notifications will work, with the fix for anything that
     /// won't: gh, the config, the app and its permission (macOS), and the
     /// schedule. Then send a test notification and say how it went out.
@@ -94,6 +100,14 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Start watching the `--label`s and `--repo`s given.
+    Add,
+    /// Stop watching the `--label`s and `--repo`s given.
+    Remove,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     // Commands that don't need to know what to watch.
@@ -106,6 +120,7 @@ fn main() -> Result<()> {
             );
             return Ok(());
         }
+        Cmd::Config { ref action } => return config_command(&cli, action.as_ref()),
         Cmd::Doctor { no_test } => {
             // Non-zero when something's wrong, for scripts.
             if doctor::run(load_state()?.last_notified, !no_test) > 0 {
@@ -161,8 +176,8 @@ fn main() -> Result<()> {
             let window = since.as_deref().map(parse_duration).transpose()?;
             notify(&repos, &watch, window, dry_run)
         }
-        Cmd::Setup => setup(&repos),
-        Cmd::InstallApp | Cmd::Doctor { .. } | Cmd::Schedule { .. } => {
+        Cmd::Setup => setup(&cli, &repos),
+        Cmd::InstallApp | Cmd::Config { .. } | Cmd::Doctor { .. } | Cmd::Schedule { .. } => {
             unreachable!("handled above")
         }
     }
@@ -170,18 +185,31 @@ fn main() -> Result<()> {
 
 /// `gh-watch setup`: each step says what it did, and a step that fails
 /// (say, no command line tools for the app) doesn't stop the rest.
-fn setup(repos: &[String]) -> Result<()> {
+///
+/// Run again, it adds to the config rather than replacing it: `gh watch
+/// setup --label customer-acme` starts watching another label, keeping
+/// everything already there.
+fn setup(cli: &Cli, repos: &[String]) -> Result<()> {
     println!("Setting up gh-watch for {}:", repos.join(", "));
 
-    // 1. Remember the repos, so scheduled runs (which start outside any
-    //    repo) know what to watch.
+    // 1. Remember what to watch, so scheduled runs (which start outside
+    //    any repo, with no flags) know.
     let config_path = Config::path()?;
-    if Config::exists()? {
-        println!("  ✓ Config: keeping your {}", config_path.display());
-    } else {
-        Config::write_new(repos)?;
-        println!("  ✓ Config: wrote {}", config_path.display());
+    let existed = Config::exists()?;
+    let mut config = Config::load()?;
+    let mut changed = config.add(repos, &cli.labels);
+    if cli.no_involved && config.involved {
+        config.involved = false;
+        changed = true;
     }
+    if changed || !existed {
+        config.save()?;
+        let did = if existed { "updated" } else { "wrote" };
+        println!("  ✓ Config: {did} {}", config_path.display());
+    } else {
+        println!("  ✓ Config: keeping your {}", config_path.display());
+    }
+    check_labels(&config, &cli.labels);
 
     // 2. The notifier app, on macOS.
     if cfg!(target_os = "macos") {
@@ -216,9 +244,69 @@ fn setup(repos: &[String]) -> Result<()> {
         state.last_notified = Some(Utc::now());
         save_state(&state)?;
     }
-    println!("  ✓ Watching from now on.");
+    println!(
+        "  ✓ Watching {}: {}, from now on.",
+        config.repos.join(", "),
+        config.describe()
+    );
     println!("\nTo see what notifications look like, try: gh watch notify --since 2d");
     Ok(())
+}
+
+/// `gh watch config`: shows what's watched, or adds or removes the
+/// `--label`s and `--repo`s given. Changes apply from the next run.
+fn config_command(cli: &Cli, action: Option<&ConfigAction>) -> Result<()> {
+    let path = Config::path()?;
+    let mut config = Config::load()?;
+    match action {
+        None => {}
+        Some(action) => {
+            if cli.labels.is_empty() && cli.repos.is_empty() {
+                bail!(
+                    "say what to change: --label <name> or --repo owner/name (repeat for several)"
+                );
+            }
+            match action {
+                ConfigAction::Add => {
+                    if !config.add(&cli.repos, &cli.labels) {
+                        println!("Already watching all of that.");
+                    }
+                    check_labels(&config, &cli.labels);
+                }
+                ConfigAction::Remove => {
+                    for name in config.remove(&cli.repos, &cli.labels) {
+                        println!("Wasn't watching {name:?}.");
+                    }
+                }
+            }
+            config.save()?;
+        }
+    }
+    let repos = if config.repos.is_empty() {
+        String::from("no repos yet (add one with `gh watch config add --repo owner/name`)")
+    } else {
+        config.repos.join(", ")
+    };
+    println!("Watching {repos}: {}.", config.describe());
+    println!("Config: {}", path.display());
+    Ok(())
+}
+
+/// Warns about labels that don't exist in a watched repo: a typo would
+/// otherwise quietly match nothing.
+fn check_labels(config: &Config, labels: &[String]) {
+    for label in labels {
+        for repo in &config.repos {
+            match gh::labels(repo, label) {
+                Ok(found) if found.contains(&label.to_lowercase()) => {}
+                Ok(_) => println!(
+                    "  ! {repo} has no label {label:?}, so nothing will match it. \
+                     See `gh label list -R {repo}`."
+                ),
+                Err(err) => println!("  ! Couldn't check label {label:?} in {repo} ({err:#})"),
+            }
+        }
+    }
 }
 
 /// The repos to watch: --repo, else the config's, else the current one.

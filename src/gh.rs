@@ -256,7 +256,14 @@ fn gh<T: DeserializeOwned>(args: &[&str]) -> Result<T> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("gh {} failed: {}", args[..2].join(" "), stderr.trim());
     }
-    serde_json::from_slice(&output.stdout).context("could not parse gh's output")
+    // A list with nothing in it can come back as no output at all (say,
+    // `gh label list --search` matching nothing), rather than `[]`.
+    let stdout: &[u8] = if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        b"[]"
+    } else {
+        &output.stdout
+    };
+    serde_json::from_slice(stdout).context("could not parse gh's output")
 }
 
 /// Where gh is: the one running us (as a gh extension), on PATH, or in
