@@ -107,7 +107,10 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Cmd::Doctor { no_test } => {
-            doctor::run(load_state()?.last_notified, !no_test);
+            // Non-zero when something's wrong, for scripts.
+            if doctor::run(load_state()?.last_notified, !no_test) > 0 {
+                std::process::exit(1);
+            }
             return Ok(());
         }
         Cmd::Schedule { remove: true } => {

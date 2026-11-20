@@ -87,14 +87,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidFinishLaunching(_ notification: Notification) {
         // `--check` (for `gh watch doctor`): say whether notifications are
         // allowed, without posting one. Prints the answer; exits 0 if
-        // they are, 2 if not.
+        // banners can show, 2 if not (provisional permission only puts
+        // them quietly in Notification Center).
         if CommandLine.arguments.dropFirst().first == "--check" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 10) { fail(3, "timed out") }
             center.getNotificationSettings { settings in
                 switch settings.authorizationStatus {
-                case .authorized, .provisional:
+                case .authorized:
                     print("allowed")
                     exit(0)
+                case .provisional:
+                    print("delivered quietly")
                 case .denied:
                     print("turned off")
                 case .notDetermined:

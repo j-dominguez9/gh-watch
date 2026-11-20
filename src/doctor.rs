@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, TimeDelta, Utc};
 
 use crate::config::Config;
 use crate::desktop::{self, Note, Way};
@@ -30,7 +30,13 @@ impl Report {
     }
 }
 
-pub fn run(last_notified: Option<DateTime<Utc>>, send_test: bool) {
+/// A last check older than this, with the schedule on, means runs have
+/// stopped or are failing (they're every 30 minutes, and a sleeping Mac
+/// catches up when it wakes).
+const STALE_AFTER: TimeDelta = TimeDelta::hours(3);
+
+/// Runs the checks and returns how many problems it found.
+pub fn run(last_notified: Option<DateTime<Utc>>, send_test: bool) -> usize {
     println!("Checking gh-watch:");
     let mut report = Report::default();
 
@@ -59,19 +65,31 @@ pub fn run(last_notified: Option<DateTime<Utc>>, send_test: bool) {
         ),
     }
 
+    let mut app_ok = true;
+    let mut scheduled = false;
     if cfg!(target_os = "macos") {
-        check_app(&mut report);
+        app_ok = check_app(&mut report);
         check_schedule(&mut report);
+        scheduled = schedule::is_installed();
     }
 
     match last_notified {
-        Some(at) => report.ok(
-            "Last check",
-            &format!(
-                "{}",
-                at.with_timezone(&Local).format("%a %b %-d, %-I:%M %p")
-            ),
-        ),
+        Some(at) => {
+            let when = at.with_timezone(&Local).format("%a %b %-d, %-I:%M %p");
+            let ago = Utc::now() - at;
+            if scheduled && ago > STALE_AFTER {
+                report.problem(
+                    "Last check",
+                    &format!(
+                        "{when}, {} ago, though the schedule should check every 30 minutes",
+                        how_long(ago)
+                    ),
+                    "run `gh watch notify` to see what fails",
+                );
+            } else {
+                report.ok("Last check", &when.to_string());
+            }
+        }
         None => report.problem(
             "Last check",
             "never: the clock hasn't started",
@@ -80,7 +98,7 @@ pub fn run(last_notified: Option<DateTime<Utc>>, send_test: bool) {
     }
 
     if send_test {
-        send_test_note(&mut report);
+        send_test_note(&mut report, app_ok);
     }
 
     if report.problems == 0 {
@@ -93,10 +111,22 @@ pub fn run(last_notified: Option<DateTime<Utc>>, send_test: bool) {
         };
         println!("\n{} {things} to fix, above.", report.problems);
     }
+    report.problems
 }
 
-/// The app: there, and allowed to notify.
-fn check_app(report: &mut Report) {
+/// "5 days", "7 hours".
+fn how_long(span: TimeDelta) -> String {
+    let (n, unit) = if span.num_days() >= 1 {
+        (span.num_days(), "day")
+    } else {
+        (span.num_hours(), "hour")
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+}
+
+/// The app: there, and allowed to notify. Returns whether it all checked out.
+fn check_app(report: &mut Report) -> bool {
+    let before = report.problems;
     let Some(program) = desktop::app() else {
         let missing = app::missing_tools();
         let fix = if missing.is_empty() {
@@ -113,7 +143,7 @@ fn check_app(report: &mut Report) {
             "not installed, so notifications have no cat icon and clicks may open nothing",
             &fix,
         );
-        return;
+        return false;
     };
     let app = program
         .ancestors()
@@ -133,6 +163,8 @@ fn check_app(report: &mut Report) {
             let answer = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let fix = if answer == "not asked yet" {
                 "run `gh watch install-app`, and click Allow when macOS asks"
+            } else if answer == "delivered quietly" {
+                "System Settings → Notifications → gh-watch → set the alert style to Banners"
             } else {
                 "System Settings → Notifications → gh-watch → turn on Allow Notifications"
             };
@@ -172,6 +204,7 @@ fn check_app(report: &mut Report) {
             "run `gh watch install-app`",
         );
     }
+    report.problems == before
 }
 
 /// The launchd job: there, running this gh-watch, and its last run fine.
@@ -213,24 +246,28 @@ fn check_schedule(report: &mut Report) {
         );
         return;
     }
-    match job.last_exit.as_deref() {
-        None => report.ok("Schedule", "every 30 minutes (no run since it was loaded)"),
-        Some("0") => report.ok("Schedule", "every 30 minutes; the last run went fine"),
-        Some(code) => {
-            let log = schedule::log_path()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            report.problem(
-                "Schedule",
-                &format!("the last run failed (exit {code})"),
-                &format!("see the end of {log}"),
-            );
-        }
+    let log = schedule::log_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    match (job.last_exit.as_deref(), job.last_signal.as_deref()) {
+        (Some("0"), _) => report.ok("Schedule", "every 30 minutes; the last run went fine"),
+        (Some(code), _) => report.problem(
+            "Schedule",
+            &format!("the last run failed (exit {code})"),
+            &format!("see the end of {log}"),
+        ),
+        (None, Some(signal)) => report.problem(
+            "Schedule",
+            &format!("the last run was killed ({signal})"),
+            &format!("see the end of {log}, and run `gh watch notify` to try it"),
+        ),
+        (None, None) => report.ok("Schedule", "every 30 minutes (no run since it was loaded)"),
     }
 }
 
-/// Sends one notification and says which way it went out.
-fn send_test_note(report: &mut Report) {
+/// Sends one notification and says which way it went out. `app_ok`: the
+/// app checks above all passed.
+fn send_test_note(report: &mut Report, app_ok: bool) {
     println!("\nSending a test notification...");
     let note = Note {
         title: String::from("gh-watch"),
@@ -246,11 +283,23 @@ fn send_test_note(report: &mut Report) {
                 "sent: you should see it now, and a click opens gh-watch's page",
             );
         }
-        Ok(way) => report.problem(
-            "Test",
-            &format!("sent with {}", way.describe()),
-            "fix the app lines above",
-        ),
+        Ok(way) => match desktop::app_error().filter(|_| app_ok) {
+            // The app looked fine but failed when it was used.
+            Some(error) => report.problem(
+                "Test",
+                &format!(
+                    "sent with {}, because the app failed: {error}",
+                    way.describe()
+                ),
+                "run `gh watch install-app` and click Allow if macOS asks, then \
+                 `gh watch doctor` again",
+            ),
+            None => report.problem(
+                "Test",
+                &format!("sent with {}", way.describe()),
+                "fix the app lines above",
+            ),
+        },
         Err(err) => report.problem(
             "Test",
             &format!("couldn't send it ({err:#})"),

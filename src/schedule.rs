@@ -74,11 +74,13 @@ pub fn remove() -> Result<bool> {
 pub struct JobStatus {
     /// The gh-watch it runs.
     pub program: Option<String>,
-    /// "0", or "78: EX_CONFIG"; None if it hasn't run since it was loaded.
+    /// "0", or "1"; None if it hasn't exited since it was loaded.
     pub last_exit: Option<String>,
-    /// launchd couldn't start it at all (say, the binary was replaced and
-    /// no longer matches what launchd recorded): `gh watch schedule` fixes
-    /// that.
+    /// "Killed: 9", if the last run was killed by a signal (launchd shows
+    /// this instead of an exit code then).
+    pub last_signal: Option<String>,
+    /// launchd couldn't start it at all (say, the binary is gone or was
+    /// replaced): `gh watch schedule` fixes that.
     pub spawn_failed: bool,
 }
 
@@ -106,10 +108,16 @@ fn parse_status(text: &str) -> JobStatus {
         if let Some(program) = line.strip_prefix("program = ") {
             status.program = Some(program.to_string());
         } else if let Some(code) = line.strip_prefix("last exit code = ") {
-            if code != "(never exited)" {
+            // launchd reports a run it couldn't start (binary missing or
+            // not executable) as EX_CONFIG; gh-watch never exits 78.
+            if code.starts_with("78:") {
+                status.spawn_failed = true;
+            } else if code != "(never exited)" {
                 status.last_exit = Some(code.to_string());
             }
-        } else if line == "job state = spawn failed" {
+        } else if let Some(signal) = line.strip_prefix("last terminating signal = ") {
+            status.last_signal = Some(signal.to_string());
+        } else if line.contains("spawn failed") {
             status.spawn_failed = true;
         }
     }
@@ -176,21 +184,33 @@ fn xml_escape(text: &str) -> String {
 mod tests {
     use super::*;
 
+    // Trimmed from real `launchctl print` output (macOS 27).
     #[test]
     fn reads_launchctl_print() {
-        let text = "gui/501/com.gh-watch.notify = {\n\tprogram = /Users/me/.cargo/bin/gh-watch\n\
-                    \tlast exit code = 78: EX_CONFIG\n\t\tjob state = spawn failed\n}";
+        let fine = "gui/501/com.gh-watch.notify = {\n\tstate = not running\n\
+                    \tprogram = /Users/me/.cargo/bin/gh-watch\n\tlast exit code = 0\n\
+                    \tjob state = exited\n}";
         assert_eq!(
-            parse_status(text),
+            parse_status(fine),
             JobStatus {
                 program: Some(String::from("/Users/me/.cargo/bin/gh-watch")),
-                last_exit: Some(String::from("78: EX_CONFIG")),
-                spawn_failed: true,
+                last_exit: Some(String::from("0")),
+                ..JobStatus::default()
             }
         );
+
+        // The binary is gone or can't be run.
+        let spawn = parse_status("\tstate = spawn scheduled\n\tlast exit code = 78: EX_CONFIG\n");
+        assert!(spawn.spawn_failed);
+        assert_eq!(spawn.last_exit, None);
+
+        let killed = parse_status("\tstate = not running\n\tlast terminating signal = Killed: 9\n");
+        assert_eq!(killed.last_signal.as_deref(), Some("Killed: 9"));
+        assert_eq!(killed.last_exit, None);
+        assert!(!killed.spawn_failed);
+
         let fresh = parse_status("\tlast exit code = (never exited)\n");
-        assert_eq!(fresh.last_exit, None);
-        assert!(!fresh.spawn_failed);
+        assert_eq!(fresh, JobStatus::default());
     }
 
     #[test]

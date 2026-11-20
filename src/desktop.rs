@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 
@@ -19,10 +21,20 @@ pub struct Note {
     pub group: String,
 }
 
-/// Set once the notifier app fails, so the rest of this run's
+/// Set once the notifier app fails in a way that would happen again (not
+/// allowed, timed out, crashed, couldn't run), so the rest of this run's
 /// notifications go straight to the next way: if it's waiting on a
 /// permission nobody answers, each try would wait out its timeout again.
-static APP_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Bad arguments (exit 1) don't set it: that's about one note, not the app.
+static APP_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Why the app last failed to send, for `gh watch doctor`.
+static APP_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Why the app failed the last time it was tried, if it did.
+pub fn app_error() -> Option<String> {
+    APP_ERROR.lock().ok().and_then(|e| e.clone())
+}
 
 /// How a notification went out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,10 +75,10 @@ pub fn send(note: &Note) -> Result<Way> {
         return Ok(Way::NotifySend);
     }
 
-    if !APP_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+    if !APP_FAILED.load(Ordering::Relaxed)
         && let Some(program) = app()
     {
-        let status = Command::new(program)
+        let output = Command::new(program)
             .args(["--title", &note.title, "--subtitle", &note.subtitle])
             .args([
                 "--message",
@@ -76,13 +88,33 @@ pub fn send(note: &Note) -> Result<Way> {
                 "--group",
                 &note.group,
             ])
-            .status();
-        match status {
-            Ok(status) if status.success() => return Ok(Way::App),
-            Ok(status) => eprintln!("gh-watch app failed ({status}), trying the next way"),
-            Err(err) => eprintln!("could not run the gh-watch app ({err}), trying the next way"),
+            .output();
+        let (error, again) = match output {
+            Ok(out) if out.status.success() => {
+                if let Ok(mut e) = APP_ERROR.lock() {
+                    *e = None;
+                }
+                return Ok(Way::App);
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let error = if stderr.is_empty() {
+                    format!("{}", out.status)
+                } else {
+                    format!("{}: {stderr}", out.status)
+                };
+                // Exit 1 is bad arguments, about this note only.
+                (error, out.status.code() != Some(1))
+            }
+            Err(err) => (format!("could not run it: {err}"), true),
+        };
+        eprintln!("gh-watch app failed ({error}), trying the next way");
+        if again {
+            APP_FAILED.store(true, Ordering::Relaxed);
         }
-        APP_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut e) = APP_ERROR.lock() {
+            *e = Some(error);
+        }
     }
 
     if let Some(program) = terminal_notifier() {
