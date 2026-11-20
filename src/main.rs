@@ -178,7 +178,7 @@ fn main() -> Result<()> {
         Cmd::Changes { since } => {
             let since = ago(parse_duration(&since)?)?;
             let found = gather(&repos, &watch, since)?;
-            print(&found, since);
+            print(&found.changes, since);
             Ok(())
         }
         Cmd::Notify { since, dry_run } => {
@@ -246,11 +246,16 @@ fn setup(cli: &Cli, repos: &[String]) -> Result<()> {
 
     // 3. Every 30 minutes.
     if cfg!(target_os = "macos") {
-        schedule::install()?;
-        println!(
-            "  ✓ Schedule: notify runs every 30 minutes (log: {})",
-            schedule::log_path()?.display()
-        );
+        match schedule::install() {
+            Ok(()) => println!(
+                "  ✓ Schedule: notify runs every 30 minutes (log: {})",
+                schedule::log_path()?.display()
+            ),
+            Err(err) => println!(
+                "  ! Schedule: not set up ({err:#}).\n    Nothing will check on its own \
+                 until it is: try `gh watch schedule`, and `gh watch doctor` to see why."
+            ),
+        }
     } else {
         println!("  - Schedule: on Linux, run `gh-watch notify` from cron or a systemd timer.");
     }
@@ -397,24 +402,39 @@ fn repos(cli: &Cli, config: &Config) -> Result<Vec<String>> {
     })
 }
 
-/// Every change in `repos` since `since`, with its repo. A repo or issue
-/// that can't be read is reported and skipped.
-fn gather(repos: &[String], watch: &Watch, since: DateTime<Utc>) -> Result<Vec<(String, Change)>> {
+/// What `gather` found.
+struct Found {
+    /// Every change, with its repo.
+    changes: Vec<(String, Change)>,
+    /// Some repo or issue couldn't be read, so changes may be missing.
+    incomplete: bool,
+}
+
+/// Every change in `repos` since `since`. A repo or issue that can't be
+/// read is reported and skipped, and the result marked incomplete.
+fn gather(repos: &[String], watch: &Watch, since: DateTime<Utc>) -> Result<Found> {
     let me = gh::me()?;
-    let mut found = Vec::new();
+    let mut found = Found {
+        changes: Vec::new(),
+        incomplete: false,
+    };
     for repo in repos {
         let issues = match changes::watched(repo, watch, since) {
             Ok(issues) => issues,
             Err(err) => {
                 eprintln!("Skipping {repo}: {err:#}");
+                found.incomplete = true;
                 continue;
             }
         };
         let (repo_changes, failed) = changes::changes(repo, &issues, &me, since);
         for (number, err) in failed {
             eprintln!("Skipping {repo}#{number}: {err:#}");
+            found.incomplete = true;
         }
-        found.extend(repo_changes.into_iter().map(|c| (repo.clone(), c)));
+        found
+            .changes
+            .extend(repo_changes.into_iter().map(|c| (repo.clone(), c)));
     }
     Ok(found)
 }
@@ -473,6 +493,10 @@ fn what(c: &Change) -> Vec<String> {
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     last_notified: Option<DateTime<Utc>>,
+    /// For each issue notified about ("owner/repo#123"), when the newest
+    /// change sent happened, so a window looked at again isn't repeated.
+    #[serde(default)]
+    sent: std::collections::BTreeMap<String, DateTime<Utc>>,
 }
 
 fn state_path() -> Result<PathBuf> {
@@ -517,65 +541,166 @@ fn notify(repos: &[String], watch: &Watch, window: Option<Duration>, dry_run: bo
             return Ok(());
         }
     };
-    let found = gather(repos, watch, since)?;
+    let Found {
+        changes: mut found,
+        incomplete,
+    } = gather(repos, watch, since)?;
+    // A window looked at again (see below) mustn't repeat what was sent.
+    if !trial {
+        found.retain(|(repo, c)| {
+            state
+                .sent
+                .get(&sent_key(repo, c))
+                .is_none_or(|sent| changed_at(c) > *sent)
+        });
+    }
     // A dry run lists each change as a "Would notify" line instead.
     if !dry_run || found.is_empty() {
         print(&found, since);
     }
 
-    let mut notes: Vec<Note> = found
+    // Each notification with the changes it covers, to remember as sent.
+    let mut notes: Vec<(Note, &[(String, Change)])> = found
         .iter()
-        .map(|(repo, c)| Note {
-            // A short headline that's never cut off, saying who did what
-            // where, and the long text in the body, which can wrap.
-            title: headline(repo, c),
-            subtitle: String::new(),
-            body: content(c),
-            open: c.url().to_string(),
-            group: repo.clone(),
+        .enumerate()
+        .map(|(i, (repo, c))| {
+            let note = Note {
+                // A short headline that's never cut off, saying who did
+                // what where, and the long text in the body, which can wrap.
+                title: headline(repo, c),
+                subtitle: String::new(),
+                body: content(c),
+                open: c.url().to_string(),
+                group: repo.clone(),
+            };
+            (note, std::slice::from_ref(&found[i]))
         })
         .collect();
     if notes.len() > MAX_NOTIFICATIONS {
         let rest = &found[MAX_NOTIFICATIONS - 1..];
         notes.truncate(MAX_NOTIFICATIONS - 1);
-        notes.push(Note {
+        let note = Note {
             title: format!("{} more updates", rest.len()),
             subtitle: String::new(),
             body: summary(rest),
-            open: format!(
-                "https://github.com/{}/issues?q=involves%3A%40me+updated%3A%3E%3D{}",
-                found[0].0,
-                since.format("%Y-%m-%d")
-            ),
+            open: summary_link(rest, since),
             group: String::from("summary"),
-        });
+        };
+        notes.push((note, rest));
     }
-    let mut said_fallback = false;
-    for note in &notes {
-        if dry_run {
+    if dry_run {
+        for (note, _) in &notes {
             println!(
                 "Would notify: {} | {}",
                 note.title,
                 note.body.replace('\n', " / ")
             );
-        } else {
-            let way = desktop::send(note)?;
-            // Said once a run, so the log shows why there's no cat.
-            if way.is_fallback() && !said_fallback {
-                eprintln!(
-                    "Sent with {}: see `gh watch doctor` for why the app wasn't used.",
-                    way.describe()
-                );
-                said_fallback = true;
+        }
+        return Ok(());
+    }
+
+    let mut said_fallback = false;
+    for (note, covers) in &notes {
+        let way = match desktop::send(note) {
+            Ok(way) => way,
+            Err(err) => {
+                // Keep what did go out, so the next run doesn't repeat it.
+                if !trial {
+                    save_state(&state)?;
+                }
+                return Err(err);
+            }
+        };
+        // Said once a run, so the log shows why there's no cat.
+        if way.is_fallback() && !said_fallback {
+            eprintln!(
+                "Sent with {}: see `gh watch doctor` for why the app wasn't used.",
+                way.describe()
+            );
+            said_fallback = true;
+        }
+        if !trial {
+            for (repo, c) in *covers {
+                state.sent.insert(sent_key(repo, c), changed_at(c));
             }
         }
     }
     if trial {
         return Ok(());
     }
-    // Moved only after sending, so a failed run tries again next time.
-    state.last_notified = Some(now);
+
+    // Whatever couldn't be read hasn't been reported, so keep the clock
+    // where it is and look at the same window again next time (what was
+    // sent isn't repeated). But not for ever: a repo that stays broken
+    // (deleted, say) mustn't hold everything back.
+    let hold = incomplete && now - since < HOLD_AT_MOST;
+    if hold {
+        eprintln!(
+            "Some of it couldn't be read, so the next run will look again from {}.",
+            since.format("%b %-d %H:%M UTC")
+        );
+    } else {
+        if incomplete {
+            eprintln!(
+                "Some of it still couldn't be read after {} hours; moving on without it.",
+                HOLD_AT_MOST.num_hours()
+            );
+        }
+        state.last_notified = Some(now);
+    }
+    // What's older than the clock can't come back, so it needn't be kept.
+    let clock = state.last_notified.unwrap_or(now);
+    state.sent.retain(|_, at| *at > clock);
     save_state(&state)
+}
+
+/// How long a failing repo can keep the clock back.
+const HOLD_AT_MOST: Duration = Duration::hours(24);
+
+/// "Arize-ai/arize#48765": how `State::sent` names an issue.
+fn sent_key(repo: &str, c: &Change) -> String {
+    format!("{repo}#{}", c.issue.number)
+}
+
+/// When the newest thing in a change happened: its last comment, or the
+/// close.
+fn changed_at(c: &Change) -> DateTime<Utc> {
+    let commented = c.comments.last().map(|comment| comment.created_at);
+    let closed = c.closed.then_some(c.issue.closed_at).flatten();
+    commented
+        .into_iter()
+        .chain(closed)
+        .max()
+        .unwrap_or(c.issue.updated_at)
+}
+
+/// Where the summary notification goes: GitHub's issue search for those
+/// repos, updated since `since`, newest first. It shows more than the
+/// changes counted (anything updated), but has every one of them, which a
+/// search can't narrow to just those issues.
+fn summary_link(rest: &[(String, Change)], since: DateTime<Utc>) -> String {
+    let mut repos: Vec<&str> = Vec::new();
+    for (repo, _) in rest {
+        if !repos.contains(&repo.as_str()) {
+            repos.push(repo);
+        }
+    }
+    let mut query: Vec<String> = repos.iter().map(|r| format!("repo:{r}")).collect();
+    query.push(String::from("is:issue"));
+    query.push(format!("updated:>={}", since.format("%Y-%m-%d")));
+    query.push(String::from("sort:updated-desc"));
+    let q: String = query
+        .join(" ")
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' => {
+                (b as char).to_string()
+            }
+            b' ' => String::from("+"),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    format!("https://github.com/issues?q={q}")
 }
 
 /// An issue as a notification names it: "arize (#48765)".
@@ -761,6 +886,35 @@ mod tests {
             ("acme/web".to_string(), change(true, None, &[])),
         ];
         assert_eq!(summary(&rest), "arize: #48765 · web: #48765");
+    }
+
+    #[test]
+    fn the_summary_links_to_every_repo_updated_since() {
+        let rest = vec![
+            (REPO.to_string(), change(true, None, &[])),
+            (REPO.to_string(), change(true, None, &[])),
+            ("acme/web".to_string(), change(true, None, &[])),
+        ];
+        let since = DateTime::parse_from_rfc3339("2026-11-18T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            summary_link(&rest, since),
+            "https://github.com/issues?q=repo%3AArize-ai/arize+repo%3Aacme/web+is%3Aissue\
+             +updated%3A%3E%3D2026-11-18+sort%3Aupdated-desc"
+        );
+    }
+
+    #[test]
+    fn a_change_happened_at_its_newest_comment_or_close() {
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let mut c = change(true, None, &[("sally", "a")]);
+        c.issue.closed_at = Some(at("2026-11-19T00:00:00Z"));
+        // The comment is from the 18th, the close the 19th.
+        assert_eq!(changed_at(&c), at("2026-11-19T00:00:00Z"));
+        c.closed = false;
+        assert_eq!(changed_at(&c), at("2026-11-18T00:00:00Z"));
+        assert_eq!(sent_key(REPO, &c), "Arize-ai/arize#48765");
     }
 
     #[test]

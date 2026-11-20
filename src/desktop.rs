@@ -74,9 +74,15 @@ impl Way {
 
 pub fn send(note: &Note) -> Result<Way> {
     if cfg!(target_os = "linux") {
+        // notify-send has a summary line and a body, no subtitle.
+        let summary = if note.subtitle.is_empty() {
+            note.title.clone()
+        } else {
+            format!("{}: {}", note.title, note.subtitle)
+        };
         let status = Command::new("notify-send")
             .args(["--app-name", "gh-watch"])
-            .arg(format!("{}: {}", note.title, note.subtitle))
+            .arg(summary)
             .arg(&note.body)
             .status()
             .context("could not run notify-send")?;
