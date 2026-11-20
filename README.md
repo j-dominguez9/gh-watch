@@ -17,22 +17,18 @@ there's no token to set up: if `gh` works, gh-watch works.
 
 ## Install
 
-As a gh extension (prebuilt binaries for macOS and Linux):
+You need the [GitHub CLI](https://cli.github.com), logged in (`brew
+install gh`, then `gh auth login`). On macOS, the notifier app also needs
+Apple's command line tools (`xcode-select --install`); you likely have
+them already, since they come with git.
 
 ```sh
 gh extension install j-dominguez9/gh-watch
+gh watch setup --repo owner/name    # or run `gh watch setup` inside the repo
+gh watch doctor                     # checks it all, and sends a test notification
 ```
 
-Or with Cargo: `cargo install --git https://github.com/j-dominguez9/gh-watch`
-(then it's `gh-watch` rather than `gh watch`).
-
-Then, from inside the repo you want to watch (or pass `--repo owner/name`):
-
-```sh
-gh watch setup
-```
-
-That does everything in one go:
+`setup` does everything in one go:
 
 1. writes a config with that repo, so scheduled runs know what to watch;
 2. on macOS, builds and installs gh-watch's notifier app, so notifications
@@ -40,13 +36,22 @@ That does everything in one go:
 3. on macOS, runs `notify` every 30 minutes;
 4. starts the clock, so you only hear about changes from now on.
 
-To see what a notification looks like right away: `gh watch notify --since 2d`.
+Add `--label customer-acme` (repeat for several) to also watch issues
+with those labels. To see real notifications right away: `gh watch notify
+--since 2d`.
 
-You need `gh auth login` done. The app needs Apple's command line tools
-(`xcode-select --install`), which you likely have already since they come
-with git. Without them, setup carries on and notifications use
+Without the command line tools, setup carries on, and notifications come
+without the cat icon or clickable links (through
 [terminal-notifier](https://github.com/julienXX/terminal-notifier) if it's
-installed, or plain macOS notifications.
+installed, or plain macOS notifications); `gh watch doctor` says how to
+fix it.
+
+Or with Cargo, from source: `cargo install --git
+https://github.com/j-dominguez9/gh-watch`, then `gh-watch setup`. It's
+`gh-watch` rather than `gh watch` everywhere then.
+
+Built and tested for Apple Silicon Macs; there are also builds for Intel
+Macs and Linux (where notifications use `notify-send`), less tried.
 
 ## Use
 
@@ -70,13 +75,12 @@ If a repo or issue can't be read (no network, say), `notify` keeps the
 clock where it was and looks at the same window again next time, without
 repeating what it already sent, for up to a day.
 
-`notify` sends one notification per changed issue: its title, and the
-newest comment in the commenter's words, or which PR closed it. Clicking
-opens the comment or issue. Past five, the rest go into one summary. The
-first run only starts the clock. On Linux it uses `notify-send`.
-
-Clicking a notification opens the comment or issue. On Linux they come
-from `notify-send`.
+`notify` sends one notification per changed issue. The headline says who
+did what where ("sally commented on arize (#48765)", "arize (#48765)
+closed by PR #94655"), and the body has the newest comment, or the issue's
+title for a close. Clicking opens the comment or issue. Past five, the rest
+go into one summary that opens a GitHub search. The first run only starts
+the clock. On Linux it uses `notify-send`, which can't open anything.
 
 Each step of `setup` also works on its own: `gh watch install-app`
 rebuilds the app, `gh watch schedule` reinstalls the schedule, and `gh
@@ -101,11 +105,28 @@ Usually the app couldn't be built (`xcode-select --install`, then `gh watch
 install-app`) or notifications for it are off (System Settings →
 Notifications → gh-watch).
 
-When a new minor version is out (0.2.0, say, but not bug-fix releases
-like 0.1.6), `notify` tells you once (it looks once a day). `gh watch
-doctor` mentions any newer release. After updating gh-watch (`gh extension
-upgrade gh-watch`), run `gh watch setup` again: it keeps your config and where it left off, rebuilds the app
-from the new version, and reloads the schedule.
+## Upgrading
+
+When a new minor version is out (0.2.0, say, but not bug-fix releases like
+0.1.6), `notify` tells you once, with the command; `gh watch doctor`
+mentions any newer release. To upgrade:
+
+```sh
+gh extension upgrade gh-watch && gh watch setup
+```
+
+Running `setup` again keeps your config and where it left off, and
+rebuilds the app and the schedule from the new version. With Cargo, it's
+`cargo install --git https://github.com/j-dominguez9/gh-watch --tag
+v<version> --force && gh-watch setup`.
+
+## Uninstalling
+
+```sh
+gh watch schedule --remove
+gh extension remove gh-watch
+rm -rf ~/Applications/gh-watch.app ~/.config/gh-watch ~/.local/state/gh-watch
+```
 
 ## Config
 
@@ -129,13 +150,13 @@ would otherwise match nothing. First time, `gh watch setup --label
 customer-acme` does both at once.
 
 It's `~/.config/gh-watch/config.toml`, which you can also edit by hand
-(`config add` and `remove` rewrite it with the standard comments):
+(`config add` and `remove` keep your comments and layout):
 
 ```toml
-# Repos to watch, as owner/name. Default: the repo you run it in.
+# Repos to watch, as owner/name.
 repos = ["owner/repo"]
 # Also watch issues with these labels, in every repo above.
-labels = ["needs-review"]
+labels = ["customer-acme"]
 # Issues you're involved in: opened, assigned, mentioned, commented on.
 involved = true
 ```
@@ -153,7 +174,8 @@ their own notifying:
 
 ## Releasing
 
-Tag a version (`git tag v0.1.0 && git push --tags`). The release workflow
+Bump `version` in `Cargo.toml`, merge, then tag it (`git tag v0.1.0 &&
+git push --tags`). The release workflow
 builds `gh-watch-darwin-arm64`, `gh-watch-darwin-amd64` and
 `gh-watch-linux-amd64` and attaches them to a GitHub release, which is
 what `gh extension install` downloads.
