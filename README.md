@@ -51,10 +51,10 @@ installed, or plain macOS notifications.
 ## Use
 
 ```sh
-gh watch changes                    # what changed in the last day, in the repo you're in
+gh watch changes                    # what changed in the last day, in what you watch
 gh watch changes --since 3h         # also 30m, 2d, 1w
-gh watch -R owner/repo changes      # another repo (repeat -R for several)
-gh watch -l needs-review changes    # also issues with this label
+gh watch changes -R owner/repo      # look at another repo instead, this once
+gh watch changes -l needs-review    # or at issues with this label instead
 gh watch notify                     # notify about changes since the last run
 gh watch notify --since 2d          # try it: notify about the last 2 days
 gh watch notify --since 2d --dry-run   # or just print what it would send
@@ -63,7 +63,12 @@ gh watch notify --since 2d --dry-run   # or just print what it would send
 `--since` and `--dry-run` leave the saved "last notified" time alone, so a
 scheduled `notify` still picks up where it left off. That also means a plain
 `--since` run's notifications can come again on the next scheduled run;
-add `--dry-run` to only print them.
+add `--dry-run` to only print them. To change what's watched for good, use
+`gh watch config` (below): `notify` always uses the config.
+
+If a repo or issue can't be read (no network, say), `notify` keeps the
+clock where it was and looks at the same window again next time, without
+repeating what it already sent, for up to a day.
 
 `notify` sends one notification per changed issue: its title, and the
 newest comment in the commenter's words, or which PR closed it. Clicking

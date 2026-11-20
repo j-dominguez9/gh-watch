@@ -54,13 +54,25 @@ pub fn run(last_notified: Option<DateTime<Utc>>, send_test: bool) -> usize {
         ),
     }
 
-    match Config::exists().and_then(|exists| exists.then(Config::load).transpose()) {
-        Ok(Some(config)) if !config.repos.is_empty() => {
-            report.ok("Config", &format!("watching {}", config.repos.join(", ")));
-        }
-        Ok(_) => report.problem(
+    match Config::read() {
+        Ok(Some(config)) => match config.check() {
+            Ok(()) => report.ok(
+                "Config",
+                &format!(
+                    "watching {}: {}",
+                    config.repos.join(", "),
+                    config.describe()
+                ),
+            ),
+            Err(err) => report.problem(
+                "Config",
+                &format!("{err:#}"),
+                "run `gh watch setup` inside the repo to watch, or `gh watch config add`",
+            ),
+        },
+        Ok(None) => report.problem(
             "Config",
-            "no repos to watch yet",
+            "none yet",
             "run `gh watch setup` inside the repo to watch",
         ),
         Err(err) => report.problem(
