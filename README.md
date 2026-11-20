@@ -107,18 +107,18 @@ Notifications → gh-watch).
 
 ## Upgrading
 
-When a new minor version is out (0.2.0, say, but not bug-fix releases like
-0.1.6), `notify` tells you once, with the command; `gh watch doctor`
-mentions any newer release. To upgrade:
-
 ```sh
-gh extension upgrade gh-watch && gh watch setup
+gh watch upgrade
 ```
 
-Running `setup` again keeps your config and where it left off, and
-rebuilds the app and the schedule from the new version. With Cargo, it's
-`cargo install --git https://github.com/j-dominguez9/gh-watch --tag
-v<version> --force && gh-watch setup`.
+gets the newest release, then rebuilds the app and reloads the schedule
+with it; your config and where it left off stay as they are. When a new
+minor version is out (0.3.0, say, but not bug-fix releases like 0.2.1),
+`notify` tells you once; `gh watch doctor` mentions any newer release.
+
+Before 0.2.0 there was no `upgrade`: from those, run `gh extension upgrade
+gh-watch && gh watch setup` once. With Cargo it's `gh-watch upgrade`,
+which rebuilds from the release's tag.
 
 ## Uninstalling
 

@@ -82,6 +82,9 @@ enum Cmd {
         #[arg(long)]
         no_test: bool,
     },
+    /// Upgrade to the newest release, then rebuild the app and reload the
+    /// schedule with it. Your config is left as it is.
+    Upgrade,
     /// Build and install gh-watch's notifier app (macOS), so notifications
     /// show under its own name and icon. Needs Apple's command line tools.
     InstallApp,
@@ -178,6 +181,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Upgrade => update::upgrade(),
         Cmd::InstallApp => {
             let path = app::install()?;
             println!(
