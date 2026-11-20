@@ -12,6 +12,7 @@
 //! - `notify`: changes and notify, on top of `state` (the clock) and
 //!   `message` (the words)
 //! - `desktop`, `app`, `schedule`: sending, the macOS app, launchd
+//! - `update`: telling you when a newer gh-watch is out
 //! - `doctor`: checks all of the above
 
 mod app;
@@ -23,6 +24,7 @@ mod notify;
 mod schedule;
 mod setup;
 mod state;
+mod update;
 
 use anyhow::{Context, Result, bail};
 use chrono::Duration;

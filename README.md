@@ -101,8 +101,10 @@ Usually the app couldn't be built (`xcode-select --install`, then `gh watch
 install-app`) or notifications for it are off (System Settings →
 Notifications → gh-watch).
 
-After updating gh-watch (`gh extension upgrade gh-watch`), run `gh watch
-setup` again: it keeps your config and where it left off, rebuilds the app
+When a new minor version is out (0.2.0, say, but not bug-fix releases
+like 0.1.6), `notify` tells you once (it looks once a day). `gh watch
+doctor` mentions any newer release. After updating gh-watch (`gh extension
+upgrade gh-watch`), run `gh watch setup` again: it keeps your config and where it left off, rebuilds the app
 from the new version, and reloads the schedule.
 
 ## Config

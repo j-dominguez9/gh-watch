@@ -10,7 +10,7 @@ use chrono::{DateTime, Local, TimeDelta, Utc};
 
 use crate::config::Config;
 use crate::desktop::{self, Note, Way};
-use crate::{app, schedule};
+use crate::{app, schedule, update};
 use gh_watch::gh;
 
 /// What's wrong, counted, so the end can say "all good" or not.
@@ -110,6 +110,33 @@ pub fn run(last_notified: Option<DateTime<Utc>>, send_test: bool) -> usize {
             "Last check",
             "never: the clock hasn't started",
             "run `gh watch setup` (or `gh watch notify` once)",
+        ),
+    }
+
+    match update::newer() {
+        Ok(None) => report.ok(
+            "Version",
+            &format!("{}, the latest", env!("CARGO_PKG_VERSION")),
+        ),
+        // A newer version isn't a problem (doctor's exit code stays 0 on a
+        // healthy install), just worth saying, with how to get it.
+        Ok(Some(newer)) => report.note(
+            "Version",
+            &format!(
+                "{} {} (you have {}); to upgrade, {}",
+                newer.version,
+                if newer.minor {
+                    "is out"
+                } else {
+                    "has bug fixes"
+                },
+                env!("CARGO_PKG_VERSION"),
+                update::how_to_upgrade(&newer.version)
+            ),
+        ),
+        Err(err) => report.note(
+            "Version",
+            &format!("couldn't check for a newer one ({err:#})"),
         ),
     }
 

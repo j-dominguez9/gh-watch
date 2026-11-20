@@ -18,6 +18,12 @@ pub struct State {
     /// change sent happened.
     #[serde(default)]
     pub sent: BTreeMap<String, DateTime<Utc>>,
+    /// When `notify` last looked for a newer gh-watch (see `update`).
+    #[serde(default)]
+    pub update_checked: Option<DateTime<Utc>>,
+    /// The newest version it told you about, so it's said once.
+    #[serde(default)]
+    pub update_announced: Option<String>,
 }
 
 fn path() -> Result<PathBuf> {
