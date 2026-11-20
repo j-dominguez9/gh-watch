@@ -19,6 +19,11 @@ pub struct Note {
     pub group: String,
 }
 
+/// Set once the notifier app fails, so the rest of this run's
+/// notifications go straight to the next way: if it's waiting on a
+/// permission nobody answers, each try would wait out its timeout again.
+static APP_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn send(note: &Note) -> Result<()> {
     if cfg!(target_os = "linux") {
         let status = Command::new("notify-send")
@@ -33,7 +38,9 @@ pub fn send(note: &Note) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(program) = app() {
+    if !APP_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+        && let Some(program) = app()
+    {
         let status = Command::new(program)
             .args(["--title", &note.title, "--subtitle", &note.subtitle])
             .args([
@@ -50,6 +57,7 @@ pub fn send(note: &Note) -> Result<()> {
             Ok(status) => eprintln!("gh-watch app failed ({status}), trying the next way"),
             Err(err) => eprintln!("could not run the gh-watch app ({err}), trying the next way"),
         }
+        APP_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     if let Some(program) = terminal_notifier() {
